@@ -1,0 +1,55 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+vendor/
+go.mod
+go.sum
+
+# Build outputs
+dist/
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+*.test
+coverage.out
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes data (don't commit)
+/postgres_data/
+/grafana_data/
+
+# Backup files
+*.backup
+*.sql
+*.sql.gz
+*.tar.gz
+
+# Temporary
+tmp/
+temp/
+*.tmp

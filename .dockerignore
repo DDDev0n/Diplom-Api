@@ -1,0 +1,6 @@
+.git
+postgres_data
+sources
+processing
+*.log
+.DS_Store
