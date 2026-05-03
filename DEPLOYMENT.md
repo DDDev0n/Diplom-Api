@@ -62,19 +62,26 @@ cd bank-api
 
 ### 3.2 Создайте production .env файл
 ```bash
-cat > .env << 'EOF'
+POSTGRES_PASSWORD=$(openssl rand -hex 32)
+RABBITMQ_PASSWORD=$(openssl rand -hex 24)
+JWT_SECRET=$(openssl rand -hex 48)
+GRAFANA_PASSWORD=$(openssl rand -hex 24)
+
+cat > .env << EOF
 # Database
 POSTGRES_DB=bank_processing_prod
 POSTGRES_USER=bank_user_prod
-POSTGRES_PASSWORD=$(openssl rand -base64 32)
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 DATABASE_URL=postgres://bank_user_prod:${POSTGRES_PASSWORD}@postgres:5432/bank_processing_prod?sslmode=disable
 
 # Cache & Queue
 REDIS_URL=redis://redis:6379/0
-RABBITMQ_URL=amqp://bank_user_prod:$(openssl rand -base64 20)@rabbitmq:5672/
+RABBITMQ_DEFAULT_USER=bank_user_prod
+RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
+RABBITMQ_URL=amqp://bank_user_prod:${RABBITMQ_PASSWORD}@rabbitmq:5672/
 
 # JWT
-JWT_SECRET=$(openssl rand -base64 48)
+JWT_SECRET=${JWT_SECRET}
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=120
 
@@ -92,7 +99,7 @@ PAYMENT_REVIEW_THRESHOLD=100000
 
 # Grafana
 GRAFANA_ADMIN_USER=admin
-GRAFANA_ADMIN_PASSWORD=$(openssl rand -base64 24)
+GRAFANA_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
 EOF
 ```
 

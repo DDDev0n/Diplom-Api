@@ -31,8 +31,8 @@ services:
     image: rabbitmq:3.13-management-alpine
     container_name: bank-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: ${POSTGRES_USER:-bank_user}
-      RABBITMQ_DEFAULT_PASS: ${POSTGRES_PASSWORD:-bank_password}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-bank_user}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-bank_password}
     ports:
       - "5672:5672"
       - "15672:15672"

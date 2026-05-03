@@ -15,6 +15,32 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+compose() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose "$@"
+    else
+        docker-compose "$@"
+    fi
+}
+
+set_env_var() {
+    local key="$1"
+    local value="$2"
+
+    if grep -q "^${key}=" .env 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" .env
+    else
+        printf '\n%s=%s\n' "$key" "$value" >> .env
+    fi
+}
+
+load_env() {
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
+}
+
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}This script must be run as root${NC}"
@@ -38,7 +64,7 @@ else
 fi
 
 # Check if Docker Compose is already installed
-if ! command -v docker-compose &> /dev/null; then
+if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose &> /dev/null; then
     curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
     echo -e "${GREEN}Docker Compose installed${NC}"
@@ -90,13 +116,28 @@ fi
 
 echo -e "${YELLOW}Step 8: Generate Production .env${NC}"
 
-# Generate secure passwords
-POSTGRES_PASSWORD=$(openssl rand -base64 32)
-RABBITMQ_PASSWORD=$(openssl rand -base64 20)
-JWT_SECRET=$(openssl rand -base64 48)
-GRAFANA_PASSWORD=$(openssl rand -base64 24)
+# Generate secure passwords. Hex is URL-safe for DATABASE_URL and RABBITMQ_URL.
+POSTGRES_PASSWORD=$(openssl rand -hex 32)
+RABBITMQ_PASSWORD=$(openssl rand -hex 24)
+JWT_SECRET=$(openssl rand -hex 48)
+GRAFANA_PASSWORD=$(openssl rand -hex 24)
 
-cat > .env << EOF
+if [ -f ".env" ]; then
+    echo -e "${YELLOW}.env already exists, preserving existing secrets and fixing RabbitMQ variables${NC}"
+    load_env
+
+    RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-$(printf '%s' "${RABBITMQ_URL:-}" | sed -n 's#^amqp://\([^:]*\):.*#\1#p')}"
+    RABBITMQ_DEFAULT_PASS="${RABBITMQ_DEFAULT_PASS:-$(printf '%s' "${RABBITMQ_URL:-}" | sed -n 's#^amqp://[^:]*:\([^@]*\)@.*#\1#p')}"
+    RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bank_user_prod}"
+    RABBITMQ_DEFAULT_PASS="${RABBITMQ_DEFAULT_PASS:-$RABBITMQ_PASSWORD}"
+
+    set_env_var "RABBITMQ_DEFAULT_USER" "$RABBITMQ_DEFAULT_USER"
+    set_env_var "RABBITMQ_DEFAULT_PASS" "$RABBITMQ_DEFAULT_PASS"
+    set_env_var "RABBITMQ_URL" "amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/"
+
+    load_env
+else
+    cat > .env << EOF
 # Database
 POSTGRES_DB=bank_processing_prod
 POSTGRES_USER=bank_user_prod
@@ -105,6 +146,8 @@ DATABASE_URL=postgres://bank_user_prod:${POSTGRES_PASSWORD}@postgres:5432/bank_p
 
 # Cache & Queue
 REDIS_URL=redis://redis:6379/0
+RABBITMQ_DEFAULT_USER=bank_user_prod
+RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
 RABBITMQ_URL=amqp://bank_user_prod:${RABBITMQ_PASSWORD}@rabbitmq:5672/
 
 # JWT
@@ -129,11 +172,14 @@ GRAFANA_ADMIN_USER=admin
 GRAFANA_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
 EOF
 
-echo -e "${GREEN}Generated .env with secure passwords${NC}"
-echo -e "${YELLOW}Save these credentials securely:${NC}"
-echo "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
-echo "RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}"
-echo "GRAFANA_PASSWORD: ${GRAFANA_PASSWORD}"
+    load_env
+
+    echo -e "${GREEN}Generated .env with secure passwords${NC}"
+    echo -e "${YELLOW}Save these credentials securely:${NC}"
+    echo "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
+    echo "RABBITMQ_PASSWORD: ${RABBITMQ_DEFAULT_PASS}"
+    echo "GRAFANA_PASSWORD: ${GRAFANA_PASSWORD}"
+fi
 
 echo -e "${YELLOW}Step 9: Start Docker Services${NC}"
 
@@ -142,10 +188,9 @@ MAX_RETRIES=3
 RETRY=0
 
 while [ $RETRY -lt $MAX_RETRIES ]; do
-    echo "Attempt $((RETRY + 1))/$MAX_RETRIES: Starting Docker services..."
-    docker-compose up -d --build
-    
-    if [ $? -eq 0 ]; then
+    echo "Attempt $((RETRY + 1))/$MAX_RETRIES: Starting database, cache and RabbitMQ..."
+
+    if compose up -d --build postgres redis rabbitmq; then
         echo -e "${GREEN}Docker services started successfully${NC}"
         break
     else
@@ -160,10 +205,62 @@ while [ $RETRY -lt $MAX_RETRIES ]; do
     fi
 done
 
-echo -e "${YELLOW}Waiting for services to be healthy...${NC}"
-sleep 15
+echo -e "${YELLOW}Waiting for RabbitMQ and syncing credentials...${NC}"
+for i in $(seq 1 30); do
+    if compose exec -T rabbitmq rabbitmq-diagnostics -q ping >/dev/null 2>&1; then
+        break
+    fi
 
-docker-compose ps
+    if [ "$i" -eq 30 ]; then
+        echo -e "${RED}RabbitMQ did not become ready${NC}"
+        compose logs rabbitmq --tail 80
+        exit 1
+    fi
+
+    sleep 2
+done
+
+compose exec -T rabbitmq rabbitmqctl add_user "$RABBITMQ_DEFAULT_USER" "$RABBITMQ_DEFAULT_PASS" >/dev/null 2>&1 || true
+compose exec -T rabbitmq rabbitmqctl change_password "$RABBITMQ_DEFAULT_USER" "$RABBITMQ_DEFAULT_PASS"
+compose exec -T rabbitmq rabbitmqctl set_permissions -p / "$RABBITMQ_DEFAULT_USER" ".*" ".*" ".*"
+
+echo -e "${YELLOW}Starting API, worker and monitoring...${NC}"
+compose up -d --build
+
+echo -e "${YELLOW}Syncing Grafana admin password...${NC}"
+for i in $(seq 1 30); do
+    if compose exec -T grafana grafana cli admin reset-admin-password "$GRAFANA_ADMIN_PASSWORD" >/dev/null 2>&1; then
+        echo -e "${GREEN}Grafana admin password synced${NC}"
+        break
+    fi
+
+    if [ "$i" -eq 30 ]; then
+        echo -e "${RED}Could not sync Grafana admin password${NC}"
+        compose logs grafana --tail 80
+        exit 1
+    fi
+
+    sleep 2
+done
+
+echo -e "${YELLOW}Waiting for API health check...${NC}"
+for i in $(seq 1 30); do
+    if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+        echo -e "${GREEN}API is healthy${NC}"
+        break
+    fi
+
+    if [ "$i" -eq 30 ]; then
+        echo -e "${RED}API did not become healthy${NC}"
+        compose logs api --tail 80
+        compose logs rabbitmq --tail 80
+        exit 1
+    fi
+
+    sleep 2
+done
+
+compose ps
 
 echo -e "${YELLOW}Step 10: Configure Nginx${NC}"
 cat > /etc/nginx/sites-available/bank-api << 'NGINX_EOF'
@@ -346,7 +443,7 @@ echo "Grafana: https://$DOMAIN/grafana (user: admin)"
 echo "Prometheus: https://$DOMAIN/prometheus"
 echo ""
 echo "API Health Check:"
-docker-compose exec api curl -s http://localhost:8000/health || echo "Checking..."
+curl -fsS http://localhost:8000/health || echo "Checking..."
 echo ""
 echo "Full documentation: /opt/bank-api/DEPLOYMENT.md"
 echo ""
