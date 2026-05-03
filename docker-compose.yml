@@ -45,6 +45,7 @@ services:
   api:
     build:
       context: .
+      dockerfile: ./Dockerfile
       target: api
     container_name: bank-api
     env_file:
@@ -62,6 +63,7 @@ services:
   worker:
     build:
       context: .
+      dockerfile: ./Dockerfile
       target: worker
     container_name: bank-worker
     env_file:
