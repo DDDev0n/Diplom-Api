@@ -6,8 +6,6 @@
 # Dependencies
 node_modules/
 vendor/
-go.mod
-go.sum
 
 # Build outputs
 dist/
