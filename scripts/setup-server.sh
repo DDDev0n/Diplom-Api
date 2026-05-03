@@ -60,6 +60,7 @@ ufw default allow outgoing
 ufw allow 22/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
+# Enable firewall without prompting
 echo "y" | ufw enable
 
 echo -e "${YELLOW}Step 6: Create Application Directory${NC}"
@@ -73,7 +74,21 @@ if [ ! -d ".git" ]; then
     git clone "$REPO_URL" .
 fi
 
-echo -e "${YELLOW}Step 7: Generate Production .env${NC}"
+echo -e "${YELLOW}Step 7: Verify Go Dependencies${NC}"
+# Check if go.mod and go.sum exist, if not pull from git
+if [ ! -f "go.mod" ] || [ ! -f "go.sum" ]; then
+    echo "go.mod or go.sum not found, pulling from git..."
+    git pull origin main
+fi
+
+# Verify files exist
+if [ ! -f "go.mod" ] || [ ! -f "go.sum" ]; then
+    echo -e "${RED}ERROR: go.mod or go.sum still missing after git pull${NC}"
+    echo "Please ensure these files are in your repository"
+    exit 1
+fi
+
+echo -e "${YELLOW}Step 8: Generate Production .env${NC}"
 
 # Generate secure passwords
 POSTGRES_PASSWORD=$(openssl rand -base64 32)
@@ -120,15 +135,37 @@ echo "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
 echo "RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}"
 echo "GRAFANA_PASSWORD: ${GRAFANA_PASSWORD}"
 
-echo -e "${YELLOW}Step 8: Start Docker Services${NC}"
-docker-compose up -d --build
+echo -e "${YELLOW}Step 9: Start Docker Services${NC}"
+
+# Retry logic for docker-compose up
+MAX_RETRIES=3
+RETRY=0
+
+while [ $RETRY -lt $MAX_RETRIES ]; do
+    echo "Attempt $((RETRY + 1))/$MAX_RETRIES: Starting Docker services..."
+    docker-compose up -d --build
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Docker services started successfully${NC}"
+        break
+    else
+        RETRY=$((RETRY + 1))
+        if [ $RETRY -lt $MAX_RETRIES ]; then
+            echo -e "${YELLOW}Retrying in 10 seconds...${NC}"
+            sleep 10
+        else
+            echo -e "${RED}Failed to start Docker services after $MAX_RETRIES attempts${NC}"
+            exit 1
+        fi
+    fi
+done
 
 echo -e "${YELLOW}Waiting for services to be healthy...${NC}"
-sleep 10
+sleep 15
 
 docker-compose ps
 
-echo -e "${YELLOW}Step 9: Configure Nginx${NC}"
+echo -e "${YELLOW}Step 10: Configure Nginx${NC}"
 cat > /etc/nginx/sites-available/bank-api << 'NGINX_EOF'
 upstream bank_api {
     server localhost:8000;
@@ -188,7 +225,7 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl restart nginx
 echo -e "${GREEN}Nginx configured${NC}"
 
-echo -e "${YELLOW}Step 10: Create Backup Script${NC}"
+echo -e "${YELLOW}Step 11: Create Backup Script${NC}"
 cat > /opt/backups/backup.sh << 'BACKUP_EOF'
 #!/bin/bash
 set -e
@@ -218,7 +255,7 @@ chmod +x /opt/backups/backup.sh
 
 echo -e "${GREEN}Backup script created and scheduled${NC}"
 
-echo -e "${YELLOW}Step 11: Setup SSL Certificate${NC}"
+echo -e "${YELLOW}Step 12: Setup SSL Certificate${NC}"
 echo "Enter your domain name (e.g., example.com):"
 read DOMAIN
 
