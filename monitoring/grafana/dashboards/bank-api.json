@@ -10,23 +10,32 @@
   "liveNow": false,
   "panels": [
     {
+      "id": 1,
+      "title": "Prometheus targets up",
+      "type": "stat",
       "datasource": {
         "type": "prometheus",
         "uid": "Prometheus"
       },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 0
-      },
-      "id": 1,
+      "targets": [
+        {
+          "expr": "sum by (job) (up)",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -42,7 +51,28 @@
         "textMode": "auto",
         "wideLayout": true
       },
-      "pluginVersion": "11.4.0",
+      "pluginVersion": "11.4.0"
+    },
+    {
+      "id": 2,
+      "title": "API uptime",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "expr": "bank_api_uptime_seconds",
@@ -50,38 +80,42 @@
           "refId": "A"
         }
       ],
-      "title": "API uptime",
-      "type": "stat"
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0"
     },
     {
+      "id": 3,
+      "title": "API request rate",
+      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 4,
+        "w": 12,
+        "h": 5
       },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps"
         },
         "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 16,
-        "x": 8,
-        "y": 0
-      },
-      "id": 2,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
       },
       "targets": [
         {
@@ -90,30 +124,11 @@
           "refId": "A"
         }
       ],
-      "title": "HTTP request rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 8
-      },
-      "id": 3,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
@@ -122,26 +137,65 @@
           "mode": "single",
           "sort": "none"
         }
-      },
-      "targets": [
-        {
-          "expr": "node_memory_MemAvailable_bytes{job='node'}",
-          "legendFormat": "Available Memory",
-          "refId": "A"
-        },
-        {
-          "expr": "node_memory_MemTotal_bytes{job='node'}",
-          "legendFormat": "Total Memory",
-          "refId": "B"
-        }
-      ],
-      "title": "System Memory",
-      "type": "timeseries"
+      }
     },
     {
+      "id": 4,
+      "title": "API errors",
+      "type": "stat",
       "datasource": {
         "type": "prometheus",
         "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 4,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(bank_api_http_requests_total{status=~\"5..|4..\"}[5m]))",
+          "legendFormat": "4xx/5xx rate",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0"
+    },
+    {
+      "id": 5,
+      "title": "PostgreSQL up",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 4,
+        "h": 5
       },
       "fieldConfig": {
         "defaults": {
@@ -149,40 +203,85 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 8
-      },
-      "id": 4,
+      "targets": [
+        {
+          "expr": "pg_up{job=\"postgres\"}",
+          "legendFormat": "pg_up",
+          "refId": "A"
+        }
+      ],
       "options": {
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
         "textMode": "auto",
         "wideLayout": true
       },
-      "targets": [
-        {
-          "expr": "pg_stat_activity_count{job='postgres'}",
-          "legendFormat": "Active Connections",
-          "refId": "A"
-        }
-      ],
-      "title": "Database Connections",
-      "type": "stat"
+      "pluginVersion": "11.4.0"
     },
     {
+      "id": 6,
+      "title": "PostgreSQL connections",
+      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 9,
+        "w": 8,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (datname, state) (pg_stat_activity_count{job=\"postgres\"})",
+          "legendFormat": "{{datname}} {{state}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "PostgreSQL DB size",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 6,
+        "h": 5
       },
       "fieldConfig": {
         "defaults": {
@@ -190,40 +289,617 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 8
-      },
-      "id": 5,
+      "targets": [
+        {
+          "expr": "pg_database_size_bytes{job=\"postgres\",datname=~\"bank_processing.*\"}",
+          "legendFormat": "{{datname}}",
+          "refId": "A"
+        }
+      ],
       "options": {
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
         "textMode": "auto",
         "wideLayout": true
       },
-      "targets": [
-        {
-          "expr": "pg_database_size_bytes{job='postgres',datname='bank_processing'}",
-          "legendFormat": "Database Size",
-          "refId": "A"
-        }
-      ],
-      "title": "Database Size",
-      "type": "stat"
+      "pluginVersion": "11.4.0"
     },
     {
+      "id": 8,
+      "title": "PostgreSQL transactions",
+      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 9,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(pg_stat_database_xact_commit{job=\"postgres\",datname=~\"bank_processing.*\"}[1m])",
+          "legendFormat": "commit {{datname}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pg_stat_database_xact_rollback{job=\"postgres\",datname=~\"bank_processing.*\"}[1m])",
+          "legendFormat": "rollback {{datname}}",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "RabbitMQ up",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"rabbitmq\"}",
+          "legendFormat": "rabbitmq",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0"
+    },
+    {
+      "id": 10,
+      "title": "RabbitMQ queue messages",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 14,
+        "w": 8,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (queue) (rabbitmq_queue_messages_ready)",
+          "legendFormat": "ready {{queue}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (queue) (rabbitmq_queue_messages_unacked)",
+          "legendFormat": "unacked {{queue}}",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "RabbitMQ connections/channels",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rabbitmq_connections",
+          "legendFormat": "connections",
+          "refId": "A"
+        },
+        {
+          "expr": "rabbitmq_channels",
+          "legendFormat": "channels",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "RabbitMQ consumers",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 14,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rabbitmq_queue_consumers)",
+          "legendFormat": "consumers",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0"
+    },
+    {
+      "id": 13,
+      "title": "Redis up",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "redis_up{job=\"redis\"}",
+          "legendFormat": "redis",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0"
+    },
+    {
+      "id": 14,
+      "title": "Redis clients",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 19,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "redis_connected_clients{job=\"redis\"}",
+          "legendFormat": "clients",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0"
+    },
+    {
+      "id": 15,
+      "title": "Redis memory",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 19,
+        "w": 8,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "redis_memory_used_bytes{job=\"redis\"}",
+          "legendFormat": "used",
+          "refId": "A"
+        },
+        {
+          "expr": "redis_memory_max_bytes{job=\"redis\"}",
+          "legendFormat": "max",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Redis commands rate",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 19,
+        "w": 8,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(redis_commands_processed_total{job=\"redis\"}[1m])",
+          "legendFormat": "commands",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "title": "CPU by container",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{instance=\"cadvisor:8080\", image!=\"\", name=~\".*bank-(api|worker|postgres|rabbitmq|redis|prometheus|grafana|postgres-exporter|redis-exporter|node-exporter|cadvisor).*\"}[1m]))",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "title": "Memory by container",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "container_memory_working_set_bytes{instance=\"cadvisor:8080\", image!=\"\", name=~\".*bank-(api|worker|postgres|rabbitmq|redis|prometheus|grafana|postgres-exporter|redis-exporter|node-exporter|cadvisor).*\"}",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "title": "Network RX by container",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(container_network_receive_bytes_total{instance=\"cadvisor:8080\", name=~\".*bank-(api|worker|postgres|rabbitmq|redis|prometheus|grafana|postgres-exporter|redis-exporter|node-exporter|cadvisor).*\"}[1m]))",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "title": "Network TX by container",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(container_network_transmit_bytes_total{instance=\"cadvisor:8080\", name=~\".*bank-(api|worker|postgres|rabbitmq|redis|prometheus|grafana|postgres-exporter|redis-exporter|node-exporter|cadvisor).*\"}[1m]))",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "title": "Host CPU usage",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 8,
+        "h": 6
       },
       "fieldConfig": {
         "defaults": {
@@ -231,16 +907,18 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
-      },
-      "id": 6,
+      "targets": [
+        {
+          "expr": "1 - avg(rate(node_cpu_seconds_total{job=\"node\",mode=\"idle\"}[1m]))",
+          "legendFormat": "cpu used",
+          "refId": "A"
+        }
+      ],
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
@@ -249,31 +927,21 @@
           "mode": "single",
           "sort": "none"
         }
-      },
-      "targets": [
-        {
-          "expr": "rate(container_cpu_usage_seconds_total{instance='cadvisor:8080',cpu='total',id=~'.*bank-postgres.*'}[1m])",
-          "legendFormat": "PostgreSQL CPU",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(container_cpu_usage_seconds_total{instance='cadvisor:8080',cpu='total',id=~'.*bank-api.*'}[1m])",
-          "legendFormat": "API CPU",
-          "refId": "B"
-        },
-        {
-          "expr": "rate(container_cpu_usage_seconds_total{instance='cadvisor:8080',cpu='total',id=~'.*bank-rabbitmq.*'}[1m])",
-          "legendFormat": "RabbitMQ CPU",
-          "refId": "C"
-        }
-      ],
-      "title": "CPU Usage by Container",
-      "type": "timeseries"
+      }
     },
     {
+      "id": 22,
+      "title": "Host memory",
+      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 38,
+        "w": 8,
+        "h": 6
       },
       "fieldConfig": {
         "defaults": {
@@ -281,16 +949,23 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "id": 7,
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes{job=\"node\"} - node_memory_MemAvailable_bytes{job=\"node\"}",
+          "legendFormat": "used",
+          "refId": "A"
+        },
+        {
+          "expr": "node_memory_MemAvailable_bytes{job=\"node\"}",
+          "legendFormat": "available",
+          "refId": "B"
+        }
+      ],
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
@@ -299,44 +974,71 @@
           "mode": "single",
           "sort": "none"
         }
+      }
+    },
+    {
+      "id": 23,
+      "title": "Host disk free",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 38,
+        "w": 8,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
       },
       "targets": [
         {
-          "expr": "container_memory_working_set_bytes{instance='cadvisor:8080',id=~'.*bank-postgres.*'}",
-          "legendFormat": "PostgreSQL Memory",
+          "expr": "node_filesystem_avail_bytes{job=\"node\",fstype!~\"tmpfs|overlay|squashfs\",mountpoint=\"/\"}",
+          "legendFormat": "free /",
           "refId": "A"
-        },
-        {
-          "expr": "container_memory_working_set_bytes{instance='cadvisor:8080',id=~'.*bank-api.*'}",
-          "legendFormat": "API Memory",
-          "refId": "B"
-        },
-        {
-          "expr": "container_memory_working_set_bytes{instance='cadvisor:8080',id=~'.*bank-rabbitmq.*'}",
-          "legendFormat": "RabbitMQ Memory",
-          "refId": "C"
         }
       ],
-      "title": "Memory Usage by Container",
-      "type": "timeseries"
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
     }
   ],
   "refresh": "10s",
   "schemaVersion": 40,
   "tags": [
     "bank",
-    "api"
+    "api",
+    "postgres",
+    "rabbitmq",
+    "redis",
+    "docker"
   ],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Bank API",
+  "title": "Bank Platform Overview",
   "uid": "bank-api",
   "version": 1,
   "weekStart": ""
