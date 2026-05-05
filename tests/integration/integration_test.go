@@ -138,7 +138,7 @@ func testClient() *http.Client {
 	if truthy(os.Getenv("PROCESSING_INSECURE_SKIP_VERIFY")) {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // Integration test flag for a known external TLS mismatch.
 	}
-	return &http.Client{Timeout: 5 * time.Second, Transport: transport}
+	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
 }
 
 func waitForAPI(t *testing.T, client *http.Client, api string) {

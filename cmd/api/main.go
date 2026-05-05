@@ -36,7 +36,10 @@ func main() {
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.APIPort,
 		Handler:           server.Routes(),
+		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	log.Printf("api listening on :%s", cfg.APIPort)

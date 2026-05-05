@@ -53,7 +53,7 @@ func main() {
 	}
 
 	base := strings.TrimRight(*apiBase, "/")
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 

@@ -75,6 +75,64 @@ type Notification struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type UserSearch struct {
+	Query string
+	Role  string
+	Limit int
+}
+
+type ClientStats struct {
+	SentCount        int64 `json:"sent_count"`
+	ReceivedCount    int64 `json:"received_count"`
+	SentAmount       int64 `json:"sent_amount"`
+	ReceivedAmount   int64 `json:"received_amount"`
+	PendingPayments  int64 `json:"pending_payments"`
+	ApprovedPayments int64 `json:"approved_payments"`
+	RejectedPayments int64 `json:"rejected_payments"`
+}
+
+type ClientProfile struct {
+	User     User        `json:"user"`
+	Stats    ClientStats `json:"stats"`
+	Payments []Payment   `json:"payments"`
+}
+
+type PaymentStats struct {
+	Total     int64 `json:"total"`
+	Pending   int64 `json:"pending"`
+	Approved  int64 `json:"approved"`
+	Rejected  int64 `json:"rejected"`
+	Completed int64 `json:"completed"`
+	Cancelled int64 `json:"cancelled"`
+}
+
+type BankerStats struct {
+	BankerID     int64      `json:"banker_id"`
+	Approved     int64      `json:"approved"`
+	Rejected     int64      `json:"rejected"`
+	Total        int64      `json:"total"`
+	LastDecision *time.Time `json:"last_decision,omitempty"`
+}
+
+type BankerStatsRow struct {
+	Banker       User       `json:"banker"`
+	Approved     int64      `json:"approved"`
+	Rejected     int64      `json:"rejected"`
+	Total        int64      `json:"total"`
+	LastDecision *time.Time `json:"last_decision,omitempty"`
+}
+
+type AuditEntry struct {
+	ID         int64     `json:"id"`
+	UserID     *int64    `json:"user_id,omitempty"`
+	Action     string    `json:"action"`
+	EntityType string    `json:"entity_type"`
+	EntityID   *int64    `json:"entity_id,omitempty"`
+	Details    string    `json:"details,omitempty"`
+	IPAddress  string    `json:"ip_address,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -105,6 +163,12 @@ func (s *Store) CreateUser(ctx context.Context, user User) (User, error) {
 	return user, err
 }
 
+func (s *Store) CountUsersByRole(ctx context.Context, role string) (int64, error) {
+	var count int64
+	err := s.pool.QueryRow(ctx, `select count(*) from users where role=$1`, role).Scan(&count)
+	return count, err
+}
+
 func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 	return scanUser(s.pool.QueryRow(ctx, `
 		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
@@ -117,6 +181,75 @@ func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
 		from users where id=$1
 	`, id))
+}
+
+func (s *Store) SearchUsers(ctx context.Context, filter UserSearch) ([]User, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	query := "%" + filter.Query + "%"
+
+	rows, err := s.pool.Query(ctx, `
+		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
+		from users
+		where ($1 = '' or role = $1)
+		  and ($2 = '%%' or email ilike $2 or full_name ilike $2 or coalesce(phone, '') ilike $2 or id::text = trim(both '%' from $2))
+		order by created_at desc
+		limit $3
+	`, filter.Role, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make([]User, 0)
+	for rows.Next() {
+		user, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) ClientProfile(ctx context.Context, clientID int64) (ClientProfile, error) {
+	user, err := s.UserByID(ctx, clientID)
+	if err != nil {
+		return ClientProfile{}, err
+	}
+
+	var stats ClientStats
+	err = s.pool.QueryRow(ctx, `
+		select
+			count(*) filter (where sender_id=$1),
+			count(*) filter (where recipient_id=$1),
+			coalesce(sum(amount_cents) filter (where sender_id=$1), 0),
+			coalesce(sum(amount_cents) filter (where recipient_id=$1), 0),
+			count(*) filter (where status=$2),
+			count(*) filter (where status=$3),
+			count(*) filter (where status=$4)
+		from payments
+		where sender_id=$1 or recipient_id=$1
+	`, clientID, StatusPending, StatusApproved, StatusRejected).Scan(
+		&stats.SentCount,
+		&stats.ReceivedCount,
+		&stats.SentAmount,
+		&stats.ReceivedAmount,
+		&stats.PendingPayments,
+		&stats.ApprovedPayments,
+		&stats.RejectedPayments,
+	)
+	if err != nil {
+		return ClientProfile{}, err
+	}
+
+	payments, err := s.PaymentsForUser(ctx, clientID, 100)
+	if err != nil {
+		return ClientProfile{}, err
+	}
+	return ClientProfile{User: user, Stats: stats, Payments: payments}, nil
 }
 
 func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, error) {
@@ -213,6 +346,26 @@ func (s *Store) PendingPayments(ctx context.Context) ([]Payment, error) {
 	return scanPayments(rows)
 }
 
+func (s *Store) PaymentsForUser(ctx context.Context, userID int64, limit int) ([]Payment, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `
+		select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
+		       created_at, processed_at
+		from payments
+		where sender_id=$1 or recipient_id=$1
+		order by created_at desc
+		limit $2
+	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPayments(rows)
+}
+
 func (s *Store) ApplyProcessingResult(ctx context.Context, paymentID int64, status string, fraudScore int, reason string) error {
 	_, err := s.pool.Exec(ctx, `
 		update payments
@@ -249,6 +402,162 @@ func (s *Store) DecidePayment(ctx context.Context, paymentID, bankerID int64, st
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *Store) PaymentStats(ctx context.Context) (PaymentStats, error) {
+	var stats PaymentStats
+	err := s.pool.QueryRow(ctx, `
+		select
+			count(*),
+			count(*) filter (where status=$1),
+			count(*) filter (where status=$2),
+			count(*) filter (where status=$3),
+			count(*) filter (where status=$4),
+			count(*) filter (where status=$5)
+		from payments
+	`, StatusPending, StatusApproved, StatusRejected, StatusCompleted, StatusCancelled).Scan(
+		&stats.Total,
+		&stats.Pending,
+		&stats.Approved,
+		&stats.Rejected,
+		&stats.Completed,
+		&stats.Cancelled,
+	)
+	return stats, err
+}
+
+func (s *Store) BankerStats(ctx context.Context, bankerID int64) (BankerStats, error) {
+	var stats BankerStats
+	stats.BankerID = bankerID
+	err := s.pool.QueryRow(ctx, `
+		select
+			count(*) filter (where status=$2),
+			count(*) filter (where status=$3),
+			count(*),
+			max(processed_at)
+		from payments
+		where approved_by=$1
+	`, bankerID, StatusApproved, StatusRejected).Scan(&stats.Approved, &stats.Rejected, &stats.Total, &stats.LastDecision)
+	return stats, err
+}
+
+func (s *Store) AllBankerStats(ctx context.Context) ([]BankerStatsRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		select u.id, u.email, u.password_hash, u.full_name, coalesce(u.phone, ''), u.role,
+		       u.balance_cents, u.daily_limit_cents, u.monthly_limit_cents, u.is_blocked, u.created_at,
+		       count(p.id) filter (where p.status=$1),
+		       count(p.id) filter (where p.status=$2),
+		       count(p.id),
+		       max(p.processed_at)
+		from users u
+		left join payments p on p.approved_by = u.id
+		where u.role = $3
+		group by u.id
+		order by count(p.id) desc, u.created_at desc
+	`, StatusApproved, StatusRejected, RoleBanker)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]BankerStatsRow, 0)
+	for rows.Next() {
+		var item BankerStatsRow
+		if err := rows.Scan(
+			&item.Banker.ID,
+			&item.Banker.Email,
+			&item.Banker.PasswordHash,
+			&item.Banker.FullName,
+			&item.Banker.Phone,
+			&item.Banker.Role,
+			&item.Banker.Balance,
+			&item.Banker.DailyLimit,
+			&item.Banker.MonthlyLimit,
+			&item.Banker.IsBlocked,
+			&item.Banker.CreatedAt,
+			&item.Approved,
+			&item.Rejected,
+			&item.Total,
+			&item.LastDecision,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) DecisionsByBanker(ctx context.Context, bankerID int64, limit int) ([]Payment, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `
+		select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
+		       created_at, processed_at
+		from payments
+		where approved_by=$1
+		order by processed_at desc nulls last, created_at desc
+		limit $2
+	`, bankerID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPayments(rows)
+}
+
+func (s *Store) AuditForUser(ctx context.Context, userID int64, limit int) ([]AuditEntry, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `
+		select id, user_id, action, entity_type, entity_id, coalesce(details, ''), coalesce(ip_address, ''), created_at
+		from audit_log
+		where user_id=$1
+		order by created_at desc
+		limit $2
+	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]AuditEntry, 0)
+	for rows.Next() {
+		var item AuditEntry
+		if err := rows.Scan(&item.ID, &item.UserID, &item.Action, &item.EntityType, &item.EntityID, &item.Details, &item.IPAddress, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) Audit(ctx context.Context, limit int) ([]AuditEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `
+		select id, user_id, action, entity_type, entity_id, coalesce(details, ''), coalesce(ip_address, ''), created_at
+		from audit_log
+		order by created_at desc
+		limit $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]AuditEntry, 0)
+	for rows.Next() {
+		var item AuditEntry
+		if err := rows.Scan(&item.ID, &item.UserID, &item.Action, &item.EntityType, &item.EntityID, &item.Details, &item.IPAddress, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func scanUser(row pgx.Row) (User, error) {

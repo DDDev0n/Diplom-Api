@@ -84,7 +84,8 @@ const openapiSpec = `{
     "/api/auth/register": {
       "post": {
         "tags": ["Auth"],
-        "summary": "Регистрация пользователя",
+        "summary": "Регистрация клиента",
+        "description": "Публичная регистрация создает только CLIENT. Первый ADMIN может быть создан этим endpoint для bootstrap, затем админы и банкиры создаются через /api/admin/users.",
         "requestBody": {
           "required": true,
           "content": {
@@ -100,16 +101,6 @@ const openapiSpec = `{
                     "phone": "+79990000001",
                     "role": "CLIENT",
                     "balance": 50000000
-                  }
-                },
-                "banker": {
-                  "summary": "Банкир",
-                  "value": {
-                    "email": "banker@test.ru",
-                    "password": "123456",
-                    "full_name": "Банкир Тест",
-                    "role": "BANKER",
-                    "balance": 0
                   }
                 }
               }
@@ -335,14 +326,212 @@ const openapiSpec = `{
     "/api/admin/users": {
       "get": {
         "tags": ["Admin"],
-        "summary": "Заглушка admin users",
+        "summary": "Список пользователей",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "Поиск по email, ФИО, телефону или ID" },
+          { "name": "role", "in": "query", "schema": { "type": "string", "enum": ["CLIENT", "BANKER", "ADMIN"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Пользователи",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/User" }
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "tags": ["Admin"],
+        "summary": "Создать клиента, банкира или администратора",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RegisterRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Пользователь создан",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/User" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/banker/clients": {
+      "get": {
+        "tags": ["Banker"],
+        "summary": "Поиск клиентов",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "Поиск по email, ФИО, телефону или ID" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Клиенты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/User" }
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/banker/clients/{id}": {
+      "get": {
+        "tags": ["Banker"],
+        "summary": "Карточка клиента с платежами и статистикой",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "responses": {
+          "200": {
+            "description": "Клиентская карточка",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ClientProfile" }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/banker/stats": {
+      "get": {
+        "tags": ["Banker"],
+        "summary": "Статистика текущего банкира по решениям",
         "security": [{ "bearerAuth": [] }],
         "responses": {
           "200": {
-            "description": "Заглушка",
+            "description": "Статистика",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+                "schema": { "$ref": "#/components/schemas/BankerStats" }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/banker/history": {
+      "get": {
+        "tags": ["Banker"],
+        "summary": "История решений текущего банкира",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Платежи, по которым банкир принял решение",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Payment" }
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/admin/stats": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "Общая статистика платежей и решений банкиров",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Статистика админки",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/admin/audit": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "Последние записи audit log",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Audit log",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/AuditEntry" }
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/admin/bankers/{id}/history": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "История решений конкретного банкира",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "responses": {
+          "200": {
+            "description": "Решения банкира",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Payment" }
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/admin/clients/{id}/history": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "История клиента: профиль, платежи и audit",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "responses": {
+          "200": {
+            "description": "История клиента",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
               }
             }
           },
@@ -508,6 +697,52 @@ const openapiSpec = `{
           "rejection_reason": { "type": "string" },
           "created_at": { "type": "string", "format": "date-time" },
           "processed_at": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "ClientStats": {
+        "type": "object",
+        "properties": {
+          "sent_count": { "type": "integer", "format": "int64" },
+          "received_count": { "type": "integer", "format": "int64" },
+          "sent_amount": { "type": "integer", "format": "int64" },
+          "received_amount": { "type": "integer", "format": "int64" },
+          "pending_payments": { "type": "integer", "format": "int64" },
+          "approved_payments": { "type": "integer", "format": "int64" },
+          "rejected_payments": { "type": "integer", "format": "int64" }
+        }
+      },
+      "ClientProfile": {
+        "type": "object",
+        "properties": {
+          "user": { "$ref": "#/components/schemas/User" },
+          "stats": { "$ref": "#/components/schemas/ClientStats" },
+          "payments": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Payment" }
+          }
+        }
+      },
+      "BankerStats": {
+        "type": "object",
+        "properties": {
+          "banker_id": { "type": "integer", "format": "int64" },
+          "approved": { "type": "integer", "format": "int64" },
+          "rejected": { "type": "integer", "format": "int64" },
+          "total": { "type": "integer", "format": "int64" },
+          "last_decision": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "AuditEntry": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "user_id": { "type": "integer", "format": "int64", "nullable": true },
+          "action": { "type": "string" },
+          "entity_type": { "type": "string" },
+          "entity_id": { "type": "integer", "format": "int64", "nullable": true },
+          "details": { "type": "string" },
+          "ip_address": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
         }
       },
       "RejectRequest": {

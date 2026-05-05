@@ -45,11 +45,20 @@ func (s Server) Routes() http.Handler {
 	mux.Handle("GET /api/payments", s.authenticated(http.HandlerFunc(s.listPayments)))
 	mux.Handle("GET /api/payments/{id}", s.authenticated(http.HandlerFunc(s.getPayment)))
 	mux.Handle("GET /api/banker/queue", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.bankerQueue))))
+	mux.Handle("GET /api/banker/clients", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.searchClients))))
+	mux.Handle("GET /api/banker/clients/{id}", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.clientProfile))))
+	mux.Handle("GET /api/banker/stats", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.bankerStats))))
+	mux.Handle("GET /api/banker/history", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.bankerHistory))))
 	mux.Handle("POST /api/banker/approve/{id}", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.approvePayment))))
 	mux.Handle("POST /api/banker/reject/{id}", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.rejectPayment))))
-	mux.Handle("GET /api/admin/users", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.usersPlaceholder))))
+	mux.Handle("GET /api/admin/users", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUsers))))
+	mux.Handle("POST /api/admin/users", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminCreateUser))))
+	mux.Handle("GET /api/admin/stats", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminStats))))
+	mux.Handle("GET /api/admin/audit", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminAudit))))
+	mux.Handle("GET /api/admin/bankers/{id}/history", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminBankerHistory))))
+	mux.Handle("GET /api/admin/clients/{id}/history", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminClientHistory))))
 
-	return withCORS(metricsMiddleware(mux))
+	return withSecurityHeaders(withCORS(metricsMiddleware(mux)))
 }
 
 func (s Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -84,13 +93,22 @@ func (s Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "email, password and full_name are required")
 		return
 	}
-	role := req.Role
-	if role == "" {
-		role = store.RoleClient
-	}
-	if role != store.RoleClient && role != store.RoleBanker && role != store.RoleAdmin {
+	role := store.RoleClient
+	if req.Role != "" && req.Role != store.RoleClient && req.Role != store.RoleAdmin {
 		writeError(w, http.StatusBadRequest, "invalid role")
 		return
+	}
+	if req.Role == store.RoleAdmin {
+		admins, err := s.store.CountUsersByRole(r.Context(), store.RoleAdmin)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check admins")
+			return
+		}
+		if admins > 0 {
+			writeError(w, http.StatusForbidden, "admin users can only be created by an admin")
+			return
+		}
+		role = store.RoleAdmin
 	}
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
@@ -228,6 +246,58 @@ func (s Server) bankerQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payments)
 }
 
+func (s Server) searchClients(w http.ResponseWriter, r *http.Request) {
+	users, err := s.store.SearchUsers(r.Context(), store.UserSearch{
+		Query: r.URL.Query().Get("q"),
+		Role:  store.RoleClient,
+		Limit: queryLimit(r, 100),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (s Server) clientProfile(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	profile, err := s.store.ClientProfile(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if profile.User.Role != store.RoleClient {
+		writeError(w, http.StatusBadRequest, "user is not a client")
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (s Server) bankerStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.BankerStats(r.Context(), currentUser(r).ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s Server) bankerHistory(w http.ResponseWriter, r *http.Request) {
+	payments, err := s.store.DecisionsByBanker(r.Context(), currentUser(r).ID, queryLimit(r, 100))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, payments)
+}
+
 func (s Server) approvePayment(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -258,8 +328,125 @@ func (s Server) rejectPayment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": store.StatusRejected})
 }
 
-func (s Server) usersPlaceholder(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"message": "admin users endpoint placeholder"})
+func (s Server) adminUsers(w http.ResponseWriter, r *http.Request) {
+	role := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("role")))
+	if role != "" && role != store.RoleClient && role != store.RoleBanker && role != store.RoleAdmin {
+		writeError(w, http.StatusBadRequest, "invalid role")
+		return
+	}
+	users, err := s.store.SearchUsers(r.Context(), store.UserSearch{
+		Query: r.URL.Query().Get("q"),
+		Role:  role,
+		Limit: queryLimit(r, 100),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (s Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
+	var req registerRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Email == "" || req.Password == "" || req.FullName == "" {
+		writeError(w, http.StatusBadRequest, "email, password and full_name are required")
+		return
+	}
+	role := req.Role
+	if role == "" {
+		role = store.RoleClient
+	}
+	if role != store.RoleClient && role != store.RoleBanker && role != store.RoleAdmin {
+		writeError(w, http.StatusBadRequest, "invalid role")
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+	user, err := s.store.CreateUser(r.Context(), store.User{
+		Email:        req.Email,
+		PasswordHash: hash,
+		FullName:     req.FullName,
+		Phone:        req.Phone,
+		Role:         role,
+		Balance:      req.Balance,
+		DailyLimit:   10_000_000,
+		MonthlyLimit: 100_000_000,
+	})
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, user)
+}
+
+func (s Server) adminStats(w http.ResponseWriter, r *http.Request) {
+	paymentStats, err := s.store.PaymentStats(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	bankerStats, err := s.store.AllBankerStats(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"payments": paymentStats,
+		"bankers":  bankerStats,
+	})
+}
+
+func (s Server) adminAudit(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.Audit(r.Context(), queryLimit(r, 200))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s Server) adminBankerHistory(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	payments, err := s.store.DecisionsByBanker(r.Context(), id, queryLimit(r, 100))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, payments)
+}
+
+func (s Server) adminClientHistory(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	profile, err := s.store.ClientProfile(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	audit, err := s.store.AuditForUser(r.Context(), id, queryLimit(r, 100))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"profile": profile,
+		"audit":   audit,
+	})
 }
 
 func (s Server) authenticated(next http.Handler) http.Handler {
@@ -304,6 +491,7 @@ func currentUser(r *http.Request) store.User {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return false
@@ -330,6 +518,21 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	return id, true
 }
 
+func queryLimit(r *http.Request, fallback int) int {
+	value := r.URL.Query().Get("limit")
+	if value == "" {
+		return fallback
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit <= 0 {
+		return fallback
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
+
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -339,6 +542,16 @@ func withCORS(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		next.ServeHTTP(w, r)
 	})
 }
