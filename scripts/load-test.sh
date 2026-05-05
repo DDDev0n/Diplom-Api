@@ -42,6 +42,7 @@ run_go run ./cmd/loadtest \
   -users "${LOAD_USERS:-20}" \
   -payments "${LOAD_PAYMENTS:-200}" \
   -concurrency "${LOAD_CONCURRENCY:-10}" \
+  -wait-concurrency "${LOAD_WAIT_CONCURRENCY:-20}" \
   -amount "${LOAD_AMOUNT:-1000}" \
   -timeout "${LOAD_TIMEOUT:-2m}" \
   ${wait_processing_flag}

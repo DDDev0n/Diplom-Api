@@ -93,3 +93,27 @@ func TestClientUsesConfiguredBearerTokenWithoutLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClientMapsProcessingRateLimitToRejectedResult(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:   server.URL,
+		AuthToken: "configured-token",
+	})
+	result, err := client.Score(context.Background(), store.Payment{ID: 1, SenderID: 1, RecipientID: 2, Amount: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != store.StatusRejected {
+		t.Fatalf("status = %q, want %q", result.Status, store.StatusRejected)
+	}
+	if result.Reason == "" {
+		t.Fatal("reason is empty")
+	}
+}

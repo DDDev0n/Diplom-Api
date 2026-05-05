@@ -99,12 +99,20 @@ func (c *Client) Score(ctx context.Context, payment store.Payment) (Result, erro
 		return Result{}, err
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusTooManyRequests {
+		reason := strings.TrimSpace(string(raw))
+		if reason == "" {
+			reason = "processing rate limit exceeded"
+		}
+		return Result{Status: store.StatusRejected, Reason: reason}, nil
+	}
 	if resp.StatusCode >= 300 {
-		return Result{}, fmt.Errorf("processing status %d", resp.StatusCode)
+		return Result{}, fmt.Errorf("processing status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 
 	var result Result
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return Result{}, err
 	}
 	if result.Status == "" {

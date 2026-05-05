@@ -43,13 +43,14 @@ func main() {
 	users := flag.Int("users", envInt("LOAD_USERS", 20), "number of sender/recipient user pairs")
 	payments := flag.Int("payments", envInt("LOAD_PAYMENTS", 200), "number of payments to create")
 	concurrency := flag.Int("concurrency", envInt("LOAD_CONCURRENCY", 10), "parallel payment creation workers")
+	waitConcurrency := flag.Int("wait-concurrency", envInt("LOAD_WAIT_CONCURRENCY", 20), "parallel payment processing wait workers")
 	amount := flag.Int64("amount", envInt64("LOAD_AMOUNT", 1000), "payment amount in cents")
 	waitProcessing := flag.Bool("wait-processing", envBool("LOAD_WAIT_PROCESSING", false), "wait until created payments leave PENDING")
 	timeout := flag.Duration("timeout", envDuration("LOAD_TIMEOUT", 2*time.Minute), "overall load test timeout")
 	flag.Parse()
 
-	if *users <= 0 || *payments <= 0 || *concurrency <= 0 {
-		log.Fatal("users, payments and concurrency must be positive")
+	if *users <= 0 || *payments <= 0 || *concurrency <= 0 || *waitConcurrency <= 0 {
+		log.Fatal("users, payments, concurrency and wait-concurrency must be positive")
 	}
 
 	base := strings.TrimRight(*apiBase, "/")
@@ -62,7 +63,7 @@ func main() {
 	}
 
 	runID := time.Now().UnixNano()
-	fmt.Printf("load test: api=%s users=%d payments=%d concurrency=%d wait_processing=%t\n", base, *users, *payments, *concurrency, *waitProcessing)
+	fmt.Printf("load test: api=%s users=%d payments=%d concurrency=%d wait_concurrency=%d wait_processing=%t\n", base, *users, *payments, *concurrency, *waitConcurrency, *waitProcessing)
 
 	pairs, registerResults, err := createUserPairs(ctx, client, base, runID, *users)
 	if err != nil {
@@ -73,8 +74,9 @@ func main() {
 	paymentResults, created := createPayments(ctx, client, base, pairs, *payments, *concurrency, *amount)
 	printSummary("create payments", paymentResults)
 
+	var processingResults []result
 	if *waitProcessing {
-		processingResults := waitPaymentsProcessed(ctx, client, base, created, *concurrency)
+		processingResults = waitPaymentsProcessed(ctx, client, base, created, *waitConcurrency)
 		printSummary("wait processing", processingResults)
 	}
 
@@ -85,6 +87,11 @@ func main() {
 		}
 	}
 	for _, item := range paymentResults {
+		if item.err != nil || item.statusCode >= 400 {
+			failed++
+		}
+	}
+	for _, item := range processingResults {
 		if item.err != nil || item.statusCode >= 400 {
 			failed++
 		}
@@ -214,6 +221,12 @@ func waitPaymentProcessed(ctx context.Context, client *http.Client, base string,
 	defer ticker.Stop()
 
 	for {
+		select {
+		case <-ctx.Done():
+			return result{name: "wait_processing", statusCode: http.StatusRequestTimeout, duration: time.Since(start), err: ctx.Err()}
+		default:
+		}
+
 		var out payment
 		res := doJSON(ctx, client, http.MethodGet, fmt.Sprintf("%s/api/payments/%d", base, item.ID), bearer(item.Token), nil, &out)
 		if res.err != nil || res.statusCode >= 400 {
