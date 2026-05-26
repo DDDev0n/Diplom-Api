@@ -41,19 +41,20 @@ type User struct {
 }
 
 type Payment struct {
-	ID              int64      `json:"id"`
-	SenderID        int64      `json:"sender_id"`
-	RecipientID     int64      `json:"recipient_id"`
-	Amount          int64      `json:"amount"`
-	Commission      int64      `json:"commission"`
-	Status          string     `json:"status"`
-	PaymentType     string     `json:"payment_type"`
-	Description     string     `json:"description,omitempty"`
-	FraudScore      int        `json:"fraud_score"`
-	ApprovedBy      *int64     `json:"approved_by,omitempty"`
-	RejectionReason string     `json:"rejection_reason,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	ProcessedAt     *time.Time `json:"processed_at,omitempty"`
+	ID               int64      `json:"id"`
+	SenderID         int64      `json:"sender_id"`
+	RecipientID      int64      `json:"recipient_id"`
+	Amount           int64      `json:"amount"`
+	Commission       int64      `json:"commission"`
+	CommissionRuleID int64      `json:"commission_rule_id"`
+	Status           string     `json:"status"`
+	PaymentType      string     `json:"payment_type"`
+	Description      string     `json:"description,omitempty"`
+	FraudScore       int        `json:"fraud_score"`
+	ApprovedBy       *int64     `json:"approved_by,omitempty"`
+	RejectionReason  string     `json:"rejection_reason,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ProcessedAt      *time.Time `json:"processed_at,omitempty"`
 }
 
 type Template struct {
@@ -272,15 +273,31 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 	if sender.IsBlocked {
 		return payment, errors.New("sender is blocked")
 	}
+
+	err = tx.QueryRow(ctx, `
+		select id, fixed_fee_cents + round(($2::numeric * percentage_fee) / 100)::bigint
+		from commissions
+		where payment_type=$1
+		  and is_active=true
+		  and $2 between min_amount_cents and max_amount_cents
+		order by min_amount_cents desc, id desc
+		limit 1
+	`, payment.PaymentType, payment.Amount).Scan(&payment.CommissionRuleID, &payment.Commission)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payment, errors.New("no active commission rule for payment type and amount")
+	}
+	if err != nil {
+		return payment, err
+	}
 	if sender.Balance < payment.Amount+payment.Commission {
 		return payment, errors.New("insufficient balance")
 	}
 
 	err = tx.QueryRow(ctx, `
-		insert into payments (sender_id, recipient_id, amount_cents, commission_cents, status, payment_type, description)
-		values ($1, $2, $3, $4, $5, $6, $7)
+		insert into payments (sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type, description)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
 		returning id, fraud_score, created_at
-	`, payment.SenderID, payment.RecipientID, payment.Amount, payment.Commission, payment.Status, payment.PaymentType, payment.Description).
+	`, payment.SenderID, payment.RecipientID, payment.Amount, payment.Commission, payment.CommissionRuleID, payment.Status, payment.PaymentType, payment.Description).
 		Scan(&payment.ID, &payment.FraudScore, &payment.CreatedAt)
 	if err != nil {
 		return payment, err
@@ -299,7 +316,7 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 
 func (s *Store) GetPayment(ctx context.Context, id int64) (Payment, error) {
 	return scanPayment(s.pool.QueryRow(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
 		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
 		       created_at, processed_at
 		from payments where id=$1
@@ -308,7 +325,7 @@ func (s *Store) GetPayment(ctx context.Context, id int64) (Payment, error) {
 
 func (s *Store) ListPayments(ctx context.Context, user User) ([]Payment, error) {
 	query := `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
 		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
 		       created_at, processed_at
 		from payments
@@ -319,7 +336,7 @@ func (s *Store) ListPayments(ctx context.Context, user User) ([]Payment, error) 
 	rows, err := s.pool.Query(ctx, query, user.ID)
 	if user.Role == RoleBanker || user.Role == RoleAdmin {
 		rows, err = s.pool.Query(ctx, `
-			select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+			select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
 			       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
 			       created_at, processed_at
 			from payments order by created_at desc limit 200
@@ -334,7 +351,7 @@ func (s *Store) ListPayments(ctx context.Context, user User) ([]Payment, error) 
 
 func (s *Store) PendingPayments(ctx context.Context) ([]Payment, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
 		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
 		       created_at, processed_at
 		from payments where status=$1 order by created_at asc limit 100
@@ -351,7 +368,7 @@ func (s *Store) PaymentsForUser(ctx context.Context, userID int64, limit int) ([
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
 		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
 		       created_at, processed_at
 		from payments
@@ -492,7 +509,7 @@ func (s *Store) DecisionsByBanker(ctx context.Context, bankerID int64, limit int
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, status, payment_type,
+		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
 		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
 		       created_at, processed_at
 		from payments
@@ -568,7 +585,7 @@ func scanUser(row pgx.Row) (User, error) {
 
 func scanPayment(row pgx.Row) (Payment, error) {
 	var payment Payment
-	err := row.Scan(&payment.ID, &payment.SenderID, &payment.RecipientID, &payment.Amount, &payment.Commission, &payment.Status, &payment.PaymentType, &payment.Description, &payment.FraudScore, &payment.ApprovedBy, &payment.RejectionReason, &payment.CreatedAt, &payment.ProcessedAt)
+	err := row.Scan(&payment.ID, &payment.SenderID, &payment.RecipientID, &payment.Amount, &payment.Commission, &payment.CommissionRuleID, &payment.Status, &payment.PaymentType, &payment.Description, &payment.FraudScore, &payment.ApprovedBy, &payment.RejectionReason, &payment.CreatedAt, &payment.ProcessedAt)
 	return payment, err
 }
 
@@ -611,12 +628,31 @@ create table if not exists payment_templates (
 	created_at timestamptz not null default now()
 );
 
+create table if not exists commissions (
+	id bigserial primary key,
+	payment_type varchar(50) not null,
+	min_amount_cents bigint not null default 0,
+	max_amount_cents bigint not null default 999999999999,
+	fixed_fee_cents bigint not null default 0,
+	percentage_fee numeric(5,2) not null default 0,
+	is_active boolean not null default true
+);
+
+insert into commissions (payment_type, min_amount_cents, max_amount_cents, fixed_fee_cents, percentage_fee, is_active)
+select rule.payment_type, 0, 999999999999, 0, 0, true
+from (values ('SINGLE'), ('RECURRING'), ('MASS_PAYOUT')) as rule(payment_type)
+where not exists (
+	select 1 from commissions c
+	where c.payment_type=rule.payment_type and c.min_amount_cents=0 and c.max_amount_cents=999999999999
+);
+
 create table if not exists payments (
 	id bigserial primary key,
 	sender_id bigint not null references users(id),
 	recipient_id bigint not null references users(id),
 	amount_cents bigint not null check (amount_cents > 0),
 	commission_cents bigint not null default 0,
+	commission_rule_id bigint not null references commissions(id),
 	status varchar(20) not null default 'PENDING',
 	payment_type varchar(30) not null default 'SINGLE',
 	description text,
@@ -628,15 +664,24 @@ create table if not exists payments (
 	processed_at timestamptz
 );
 
-create table if not exists commissions (
-	id bigserial primary key,
-	payment_type varchar(50) not null,
-	min_amount_cents bigint not null default 0,
-	max_amount_cents bigint not null default 999999999999,
-	fixed_fee_cents bigint not null default 0,
-	percentage_fee numeric(5,2) not null default 0,
-	is_active boolean not null default true
-);
+alter table payments add column if not exists commission_rule_id bigint references commissions(id);
+
+insert into commissions (payment_type, min_amount_cents, max_amount_cents, fixed_fee_cents, percentage_fee, is_active)
+select distinct p.payment_type, 0, 999999999999, 0, 0, true
+from payments p
+where not exists (select 1 from commissions c where c.payment_type=p.payment_type and c.is_active=true);
+
+update payments p
+set commission_rule_id = (
+	select c.id
+	from commissions c
+	where c.payment_type=p.payment_type and c.is_active=true
+	order by c.min_amount_cents, c.id
+	limit 1
+)
+where p.commission_rule_id is null;
+
+alter table payments alter column commission_rule_id set not null;
 
 create table if not exists notifications (
 	id bigserial primary key,
@@ -662,5 +707,6 @@ create table if not exists audit_log (
 create index if not exists idx_payments_sender on payments(sender_id);
 create index if not exists idx_payments_recipient on payments(recipient_id);
 create index if not exists idx_payments_status on payments(status);
+create index if not exists idx_payments_commission_rule on payments(commission_rule_id);
 create index if not exists idx_users_full_name on users(full_name);
 `

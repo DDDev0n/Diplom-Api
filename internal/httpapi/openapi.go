@@ -686,6 +686,7 @@ const openapiSpec = `{
           "recipient_id": { "type": "integer", "format": "int64" },
           "amount": { "type": "integer", "format": "int64" },
           "commission": { "type": "integer", "format": "int64" },
+          "commission_rule_id": { "type": "integer", "format": "int64" },
           "status": {
             "type": "string",
             "enum": ["PENDING", "APPROVED", "REJECTED", "COMPLETED", "CANCELLED"]
