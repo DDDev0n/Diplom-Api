@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -134,6 +135,16 @@ func (s Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create token")
 		return
 	}
+	if claims, err := auth.ParseToken(s.cfg.JWTSecret, token); err == nil {
+		_ = s.store.RecordAuthSession(r.Context(), store.AuthSession{
+			UserID:    user.ID,
+			TokenID:   claims.ID,
+			IPAddress: clientIP(r),
+			UserAgent: r.UserAgent(),
+			IssuedAt:  claims.IssuedAt.Time,
+			ExpiresAt: claims.ExpiresAt.Time,
+		})
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "user": user})
 }
 
@@ -161,11 +172,33 @@ func (s Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create token")
 		return
 	}
+	if claims, err := auth.ParseToken(s.cfg.JWTSecret, token); err == nil {
+		_ = s.store.RecordAuthSession(r.Context(), store.AuthSession{
+			UserID:    user.ID,
+			TokenID:   claims.ID,
+			IPAddress: clientIP(r),
+			UserAgent: r.UserAgent(),
+			IssuedAt:  claims.IssuedAt.Time,
+			ExpiresAt: claims.ExpiresAt.Time,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
 }
 
 func (s Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, currentUser(r))
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 type createPaymentRequest struct {

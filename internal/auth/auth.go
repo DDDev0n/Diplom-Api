@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -25,6 +27,10 @@ func VerifyPassword(hash, password string) bool {
 }
 
 func CreateToken(secret string, userID int64, role string) (string, error) {
+	tokenID, err := randomTokenID()
+	if err != nil {
+		return "", err
+	}
 	claims := Claims{
 		UserID: userID,
 		Role:   role,
@@ -32,6 +38,7 @@ func CreateToken(secret string, userID int64, role string) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ID:        tokenID,
 			Subject:   role,
 		},
 	}
@@ -53,4 +60,12 @@ func ParseToken(secret, raw string) (Claims, error) {
 		return Claims{}, errors.New("invalid token")
 	}
 	return *claims, nil
+}
+
+func randomTokenID() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }

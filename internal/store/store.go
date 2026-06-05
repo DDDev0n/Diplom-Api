@@ -134,6 +134,17 @@ type AuditEntry struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+type AuthSession struct {
+	ID        int64      `json:"id"`
+	UserID    int64      `json:"user_id"`
+	TokenID   string     `json:"token_id"`
+	IPAddress string     `json:"ip_address,omitempty"`
+	UserAgent string     `json:"user_agent,omitempty"`
+	IssuedAt  time.Time  `json:"issued_at"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+}
+
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -151,7 +162,22 @@ func (s *Store) Close() {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, schemaSQL)
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	// API and worker start together and must not execute DDL concurrently.
+	const migrationLockID int64 = 4241434
+	if _, err = conn.Exec(ctx, `select pg_advisory_lock($1)`, migrationLockID); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.Exec(context.Background(), `select pg_advisory_unlock($1)`, migrationLockID)
+	}()
+
+	_, err = conn.Exec(ctx, schemaSQL)
 	return err
 }
 
@@ -162,6 +188,15 @@ func (s *Store) CreateUser(ctx context.Context, user User) (User, error) {
 		returning id, created_at
 	`, user.Email, user.PasswordHash, user.FullName, user.Phone, user.Role, user.Balance, user.DailyLimit, user.MonthlyLimit).Scan(&user.ID, &user.CreatedAt)
 	return user, err
+}
+
+func (s *Store) RecordAuthSession(ctx context.Context, session AuthSession) error {
+	_, err := s.pool.Exec(ctx, `
+		insert into auth_sessions (user_id, token_id, ip_address, user_agent, issued_at, expires_at)
+		values ($1, $2, nullif($3, ''), nullif($4, ''), $5, $6)
+		on conflict (token_id) do nothing
+	`, session.UserID, session.TokenID, session.IPAddress, session.UserAgent, session.IssuedAt, session.ExpiresAt)
+	return err
 }
 
 func (s *Store) CountUsersByRole(ctx context.Context, role string) (int64, error) {
@@ -256,7 +291,7 @@ func (s *Store) ClientProfile(ctx context.Context, clientID int64) (ClientProfil
 func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, error) {
 	payment.Status = StatusPending
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return payment, err
 	}
@@ -393,7 +428,7 @@ func (s *Store) ApplyProcessingResult(ctx context.Context, paymentID int64, stat
 }
 
 func (s *Store) DecidePayment(ctx context.Context, paymentID, bankerID int64, status, reason string) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -656,7 +691,6 @@ create table if not exists payments (
 	status varchar(20) not null default 'PENDING',
 	payment_type varchar(30) not null default 'SINGLE',
 	description text,
-	template_id bigint references payment_templates(id),
 	fraud_score integer not null default 0,
 	approved_by bigint references users(id),
 	rejection_reason text,
@@ -664,6 +698,7 @@ create table if not exists payments (
 	processed_at timestamptz
 );
 
+alter table payments drop column if exists template_id;
 alter table payments add column if not exists commission_rule_id bigint references commissions(id);
 
 insert into commissions (payment_type, min_amount_cents, max_amount_cents, fixed_fee_cents, percentage_fee, is_active)
@@ -704,9 +739,244 @@ create table if not exists audit_log (
 	created_at timestamptz not null default now()
 );
 
+create table if not exists auth_sessions (
+	id bigserial primary key,
+	user_id bigint not null references users(id),
+	token_id varchar(64) unique not null,
+	ip_address varchar(45),
+	user_agent text,
+	issued_at timestamptz not null default now(),
+	expires_at timestamptz not null,
+	revoked_at timestamptz
+);
+
+create table if not exists payment_status_history (
+	id bigserial primary key,
+	payment_id bigint not null references payments(id),
+	old_status varchar(20),
+	new_status varchar(20) not null,
+	changed_by bigint references users(id),
+	reason text,
+	created_at timestamptz not null default now()
+);
+
+create table if not exists payment_transaction_log (
+	id bigserial primary key,
+	payment_id bigint references payments(id),
+	operation varchar(100) not null,
+	status varchar(20),
+	amount_cents bigint,
+	commission_cents bigint,
+	details text,
+	created_at timestamptz not null default now()
+);
+
+create table if not exists integration_requests (
+	id bigserial primary key,
+	payment_id bigint references payments(id),
+	target_service varchar(100) not null,
+	request_key varchar(128),
+	http_status integer,
+	result_status varchar(50),
+	error_message text,
+	started_at timestamptz not null default now(),
+	finished_at timestamptz
+);
+
+create table if not exists rate_limit_events (
+	id bigserial primary key,
+	user_id bigint references users(id),
+	endpoint varchar(255) not null,
+	limit_key varchar(255),
+	reason text,
+	created_at timestamptz not null default now()
+);
+
+create table if not exists security_events (
+	id bigserial primary key,
+	user_id bigint references users(id),
+	event_type varchar(100) not null,
+	ip_address varchar(45),
+	user_agent text,
+	details text,
+	created_at timestamptz not null default now()
+);
+
+create table if not exists system_events (
+	id bigserial primary key,
+	user_id bigint references users(id),
+	component varchar(100) not null,
+	event_type varchar(100) not null,
+	details text,
+	created_at timestamptz not null default now()
+);
+alter table system_events add column if not exists user_id bigint references users(id);
+
+create table if not exists backup_jobs (
+	id bigserial primary key,
+	created_by bigint references users(id),
+	job_name varchar(100) not null,
+	storage_path text not null,
+	status varchar(30) not null default 'PLANNED',
+	started_at timestamptz,
+	finished_at timestamptz,
+	details text
+);
+alter table backup_jobs add column if not exists created_by bigint references users(id);
+alter table backup_jobs alter column storage_path drop not null;
+
 create index if not exists idx_payments_sender on payments(sender_id);
 create index if not exists idx_payments_recipient on payments(recipient_id);
 create index if not exists idx_payments_status on payments(status);
 create index if not exists idx_payments_commission_rule on payments(commission_rule_id);
 create index if not exists idx_users_full_name on users(full_name);
+create index if not exists idx_auth_sessions_user on auth_sessions(user_id);
+create index if not exists idx_payment_status_history_payment on payment_status_history(payment_id);
+create index if not exists idx_payment_transaction_log_payment on payment_transaction_log(payment_id);
+create index if not exists idx_integration_requests_payment on integration_requests(payment_id);
+create index if not exists idx_security_events_user on security_events(user_id);
+create index if not exists idx_system_events_component on system_events(component);
+create index if not exists idx_system_events_user on system_events(user_id);
+create index if not exists idx_backup_jobs_created_by on backup_jobs(created_by);
+
+create or replace function set_users_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+	new.updated_at = now();
+	return new;
+end;
+$$;
+
+drop trigger if exists trg_users_updated_at on users;
+create trigger trg_users_updated_at
+before update on users
+for each row
+execute function set_users_updated_at();
+
+create or replace function validate_payment_integrity()
+returns trigger
+language plpgsql
+as $$
+declare
+	approver_role varchar(20);
+begin
+	if new.sender_id = new.recipient_id then
+		raise exception 'sender and recipient must be different';
+	end if;
+
+	if new.approved_by is not null then
+		select role into approver_role
+		from users
+		where id = new.approved_by;
+
+		if approver_role is null or approver_role not in ('BANKER', 'ADMIN') then
+			raise exception 'approved_by must reference banker or admin user';
+		end if;
+	end if;
+
+	if new.status in ('APPROVED', 'REJECTED', 'COMPLETED', 'CANCELLED') and new.processed_at is null then
+		new.processed_at = now();
+	end if;
+
+	return new;
+end;
+$$;
+
+drop trigger if exists trg_payments_integrity on payments;
+create trigger trg_payments_integrity
+before insert or update on payments
+for each row
+execute function validate_payment_integrity();
+
+create or replace function log_payment_insert()
+returns trigger
+language plpgsql
+as $$
+begin
+	insert into payment_transaction_log (payment_id, operation, status, amount_cents, commission_cents, details)
+	values (new.id, 'CREATE_PAYMENT', new.status, new.amount_cents, new.commission_cents, 'payment created');
+
+	insert into payment_status_history (payment_id, old_status, new_status, changed_by, reason)
+	values (new.id, null, new.status, new.sender_id, 'initial status');
+
+	return new;
+end;
+$$;
+
+drop trigger if exists trg_payments_insert_log on payments;
+create trigger trg_payments_insert_log
+after insert on payments
+for each row
+execute function log_payment_insert();
+
+create or replace function log_payment_status_change()
+returns trigger
+language plpgsql
+as $$
+begin
+	if old.status is distinct from new.status then
+		insert into payment_status_history (payment_id, old_status, new_status, changed_by, reason)
+		values (new.id, old.status, new.status, new.approved_by, new.rejection_reason);
+
+		insert into payment_transaction_log (payment_id, operation, status, amount_cents, commission_cents, details)
+		values (
+			new.id,
+			'STATUS_CHANGE',
+			new.status,
+			new.amount_cents,
+			new.commission_cents,
+			'status=' || old.status || '->' || new.status ||
+			'; fraud_score=' || coalesce(new.fraud_score::text, '0') ||
+			'; reason=' || coalesce(new.rejection_reason, '')
+		);
+
+		insert into audit_log (user_id, action, entity_type, entity_id, details)
+		values (
+			new.approved_by,
+			'PAYMENT_STATUS_CHANGED',
+			'payment',
+			new.id,
+			'status=' || old.status || '->' || new.status ||
+			'; fraud_score=' || coalesce(new.fraud_score::text, '0') ||
+			'; reason=' || coalesce(new.rejection_reason, '')
+		);
+	end if;
+
+	return new;
+end;
+$$;
+
+drop trigger if exists trg_payments_status_audit on payments;
+create trigger trg_payments_status_audit
+after update of status on payments
+for each row
+execute function log_payment_status_change();
+
+create or replace function log_auth_session_security_event()
+returns trigger
+language plpgsql
+as $$
+begin
+	insert into security_events (user_id, event_type, ip_address, user_agent, details)
+	values (new.user_id, 'AUTH_SESSION_CREATED', new.ip_address, new.user_agent, 'token_id=' || new.token_id);
+	return new;
+end;
+$$;
+
+drop trigger if exists trg_auth_sessions_security_event on auth_sessions;
+create trigger trg_auth_sessions_security_event
+after insert on auth_sessions
+for each row
+execute function log_auth_session_security_event();
+
+insert into system_events (component, event_type, details)
+select 'Backend Service', 'SCHEMA_MIGRATION', 'schema checked by Store.Migrate'
+where not exists (
+	select 1 from system_events
+	where component='Backend Service'
+	  and event_type='SCHEMA_MIGRATION'
+	  and details='schema checked by Store.Migrate'
+)
 `
