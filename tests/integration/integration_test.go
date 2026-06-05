@@ -110,8 +110,8 @@ func TestPaymentFlowThroughAPIAndQueue(t *testing.T) {
 }
 
 func TestExternalProcessingReachable(t *testing.T) {
-	base := strings.TrimRight(env("PROCESSING_BASE_URL", "https://pay.projectl.ru"), "/")
-	healthPath := "/" + strings.TrimLeft(env("PROCESSING_HEALTH_PATH", "/actuator/health"), "/")
+	base := strings.TrimRight(env("PROCESSING_BASE_URL", "https://levandr.tmland.ru"), "/")
+	healthPath := "/" + strings.TrimLeft(env("PROCESSING_HEALTH_PATH", "/api/v1/health"), "/")
 	client := testClient()
 
 	req, err := http.NewRequest(http.MethodGet, base+healthPath, nil)

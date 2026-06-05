@@ -14,7 +14,7 @@
 - `postgres-exporter` - метрики PostgreSQL для Prometheus.
 - `node-exporter` - системные метрики CPU/RAM/disk.
 - `cadvisor` - метрики нагрузки Docker-контейнеров.
-- `processing` - внешний сервис на `https://pay.projectl.ru/`; в этом проекте не хранится и не запускается.
+- `processing` - внешний сервис на `https://levandr.tmland.ru/`; в этом проекте не хранится и не запускается.
 
 Фронтенд в этом репозитории намеренно не реализуется.
 
@@ -37,7 +37,7 @@ Container metrics - `http://localhost:8081/metrics`.
 Go worker ходит во внешний processing по HTTPS:
 
 ```bash
-PROCESSING_SERVICE_URL=https://pay.projectl.ru
+PROCESSING_SERVICE_URL=https://levandr.tmland.ru
 PROCESSING_LOGIN_PATH=/api/v1/auth/login
 PROCESSING_PROCESS_PATH=/api/v1/payments/process
 PROCESSING_AUTH_TOKEN=

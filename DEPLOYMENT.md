@@ -86,7 +86,7 @@ JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=120
 
 # External Processing Service
-PROCESSING_SERVICE_URL=https://pay.projectl.ru
+PROCESSING_SERVICE_URL=https://levandr.tmland.ru
 PROCESSING_LOGIN_PATH=/api/v1/auth/login
 PROCESSING_PROCESS_PATH=/api/v1/payments/process
 PROCESSING_AUTH_TOKEN=<YOUR_TOKEN>

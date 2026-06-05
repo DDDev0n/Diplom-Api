@@ -32,7 +32,7 @@ func Load() Config {
 		RedisURL:               env("REDIS_URL", "redis://localhost:6379/0"),
 		RabbitMQURL:            env("RABBITMQ_URL", "amqp://bank_user:bank_password@localhost:5672/"),
 		JWTSecret:              env("JWT_SECRET", "change-me-in-production-32-chars-min"),
-		ProcessingServiceURL:   env("PROCESSING_SERVICE_URL", "https://pay.projectl.ru"),
+		ProcessingServiceURL:   env("PROCESSING_SERVICE_URL", "https://levandr.tmland.ru"),
 		ProcessingLoginPath:    env("PROCESSING_LOGIN_PATH", "/api/v1/auth/login"),
 		ProcessingProcessPath:  env("PROCESSING_PROCESS_PATH", "/api/v1/payments/process"),
 		ProcessingAuthToken:    env("PROCESSING_AUTH_TOKEN", ""),
