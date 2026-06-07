@@ -41,6 +41,9 @@ POST /api/payments           - создание платежа по recipient_id
 POST /api/payments/by-email  - создание платежа по email получателя
 GET  /api/payments           - список платежей
 GET  /api/payments/{id}      - просмотр платежа
+GET  /api/users/by-email     - поиск получателя по email
+GET  /api/users/{id}         - публичные данные пользователя
+PUT  /api/admin/users/{id}/limits - изменение лимитов пользователя
 ```
 
 Go worker ходит во внешний processing по HTTPS:

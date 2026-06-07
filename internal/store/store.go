@@ -41,20 +41,22 @@ type User struct {
 }
 
 type Payment struct {
-	ID               int64      `json:"id"`
-	SenderID         int64      `json:"sender_id"`
-	RecipientID      int64      `json:"recipient_id"`
-	Amount           int64      `json:"amount"`
-	Commission       int64      `json:"commission"`
-	CommissionRuleID int64      `json:"commission_rule_id"`
-	Status           string     `json:"status"`
-	PaymentType      string     `json:"payment_type"`
-	Description      string     `json:"description,omitempty"`
-	FraudScore       int        `json:"fraud_score"`
-	ApprovedBy       *int64     `json:"approved_by,omitempty"`
-	RejectionReason  string     `json:"rejection_reason,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	ProcessedAt      *time.Time `json:"processed_at,omitempty"`
+	ID                int64      `json:"id"`
+	SenderID          int64      `json:"sender_id"`
+	RecipientID       int64      `json:"recipient_id"`
+	SenderFullName    string     `json:"sender_full_name,omitempty"`
+	RecipientFullName string     `json:"recipient_full_name,omitempty"`
+	Amount            int64      `json:"amount"`
+	Commission        int64      `json:"commission"`
+	CommissionRuleID  int64      `json:"commission_rule_id"`
+	Status            string     `json:"status"`
+	PaymentType       string     `json:"payment_type"`
+	Description       string     `json:"description,omitempty"`
+	FraudScore        int        `json:"fraud_score"`
+	ApprovedBy        *int64     `json:"approved_by,omitempty"`
+	RejectionReason   string     `json:"rejection_reason,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	ProcessedAt       *time.Time `json:"processed_at,omitempty"`
 }
 
 type Template struct {
@@ -80,6 +82,12 @@ type UserSearch struct {
 	Query string
 	Role  string
 	Limit int
+}
+
+type PublicUser struct {
+	ID       int64  `json:"id"`
+	Email    string `json:"email"`
+	FullName string `json:"full_name"`
 }
 
 type ClientStats struct {
@@ -219,6 +227,35 @@ func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 	`, id))
 }
 
+func (s *Store) PublicUserByID(ctx context.Context, id int64) (PublicUser, error) {
+	var user PublicUser
+	err := s.pool.QueryRow(ctx, `
+		select id, email, full_name
+		from users
+		where id=$1 and is_blocked=false
+	`, id).Scan(&user.ID, &user.Email, &user.FullName)
+	return user, err
+}
+
+func (s *Store) PublicUserByEmail(ctx context.Context, email string) (PublicUser, error) {
+	var user PublicUser
+	err := s.pool.QueryRow(ctx, `
+		select id, email, full_name
+		from users
+		where lower(email)=lower($1) and is_blocked=false
+	`, email).Scan(&user.ID, &user.Email, &user.FullName)
+	return user, err
+}
+
+func (s *Store) UpdateUserLimits(ctx context.Context, userID, dailyLimit, monthlyLimit int64) (User, error) {
+	return scanUser(s.pool.QueryRow(ctx, `
+		update users
+		set daily_limit_cents=$2, monthly_limit_cents=$3, updated_at=now()
+		where id=$1
+		returning id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
+	`, userID, dailyLimit, monthlyLimit))
+}
+
 func (s *Store) SearchUsers(ctx context.Context, filter UserSearch) ([]User, error) {
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
@@ -308,6 +345,21 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 	if sender.IsBlocked {
 		return payment, errors.New("sender is blocked")
 	}
+	payment.SenderFullName = sender.FullName
+
+	var recipientFullName string
+	err = tx.QueryRow(ctx, `
+		select full_name
+		from users
+		where id=$1 and is_blocked=false
+	`, payment.RecipientID).Scan(&recipientFullName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payment, errors.New("recipient not found")
+	}
+	if err != nil {
+		return payment, err
+	}
+	payment.RecipientFullName = recipientFullName
 
 	err = tx.QueryRow(ctx, `
 		select id, fixed_fee_cents + round(($2::numeric * percentage_fee) / 100)::bigint
@@ -351,30 +403,41 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 
 func (s *Store) GetPayment(ctx context.Context, id int64) (Payment, error) {
 	return scanPayment(s.pool.QueryRow(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
-		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
-		       created_at, processed_at
-		from payments where id=$1
+		select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
+		       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
+		       coalesce(p.description, ''), p.fraud_score, p.approved_by, coalesce(p.rejection_reason, ''),
+		       p.created_at, p.processed_at
+		from payments p
+		join users su on su.id=p.sender_id
+		join users ru on ru.id=p.recipient_id
+		where p.id=$1
 	`, id))
 }
 
 func (s *Store) ListPayments(ctx context.Context, user User) ([]Payment, error) {
 	query := `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
-		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
-		       created_at, processed_at
-		from payments
-		where sender_id=$1 or recipient_id=$1
-		order by created_at desc
+		select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
+		       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
+		       coalesce(p.description, ''), p.fraud_score, p.approved_by, coalesce(p.rejection_reason, ''),
+		       p.created_at, p.processed_at
+		from payments p
+		join users su on su.id=p.sender_id
+		join users ru on ru.id=p.recipient_id
+		where p.sender_id=$1 or p.recipient_id=$1
+		order by p.created_at desc
 		limit 100
 	`
 	rows, err := s.pool.Query(ctx, query, user.ID)
 	if user.Role == RoleBanker || user.Role == RoleAdmin {
 		rows, err = s.pool.Query(ctx, `
-			select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
-			       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
-			       created_at, processed_at
-			from payments order by created_at desc limit 200
+			select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
+			       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
+			       coalesce(p.description, ''), p.fraud_score, p.approved_by, coalesce(p.rejection_reason, ''),
+			       p.created_at, p.processed_at
+			from payments p
+			join users su on su.id=p.sender_id
+			join users ru on ru.id=p.recipient_id
+			order by p.created_at desc limit 200
 		`)
 	}
 	if err != nil {
@@ -386,10 +449,14 @@ func (s *Store) ListPayments(ctx context.Context, user User) ([]Payment, error) 
 
 func (s *Store) PendingPayments(ctx context.Context) ([]Payment, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
-		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
-		       created_at, processed_at
-		from payments where status=$1 order by created_at asc limit 100
+		select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
+		       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
+		       coalesce(p.description, ''), p.fraud_score, p.approved_by, coalesce(p.rejection_reason, ''),
+		       p.created_at, p.processed_at
+		from payments p
+		join users su on su.id=p.sender_id
+		join users ru on ru.id=p.recipient_id
+		where p.status=$1 order by p.created_at asc limit 100
 	`, StatusPending)
 	if err != nil {
 		return nil, err
@@ -403,12 +470,15 @@ func (s *Store) PaymentsForUser(ctx context.Context, userID int64, limit int) ([
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
-		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
-		       created_at, processed_at
-		from payments
-		where sender_id=$1 or recipient_id=$1
-		order by created_at desc
+		select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
+		       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
+		       coalesce(p.description, ''), p.fraud_score, p.approved_by, coalesce(p.rejection_reason, ''),
+		       p.created_at, p.processed_at
+		from payments p
+		join users su on su.id=p.sender_id
+		join users ru on ru.id=p.recipient_id
+		where p.sender_id=$1 or p.recipient_id=$1
+		order by p.created_at desc
 		limit $2
 	`, userID, limit)
 	if err != nil {
@@ -544,12 +614,15 @@ func (s *Store) DecisionsByBanker(ctx context.Context, bankerID int64, limit int
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx, `
-		select id, sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type,
-		       coalesce(description, ''), fraud_score, approved_by, coalesce(rejection_reason, ''),
-		       created_at, processed_at
-		from payments
-		where approved_by=$1
-		order by processed_at desc nulls last, created_at desc
+		select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
+		       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
+		       coalesce(p.description, ''), p.fraud_score, p.approved_by, coalesce(p.rejection_reason, ''),
+		       p.created_at, p.processed_at
+		from payments p
+		join users su on su.id=p.sender_id
+		join users ru on ru.id=p.recipient_id
+		where p.approved_by=$1
+		order by p.processed_at desc nulls last, p.created_at desc
 		limit $2
 	`, bankerID, limit)
 	if err != nil {
@@ -620,7 +693,7 @@ func scanUser(row pgx.Row) (User, error) {
 
 func scanPayment(row pgx.Row) (Payment, error) {
 	var payment Payment
-	err := row.Scan(&payment.ID, &payment.SenderID, &payment.RecipientID, &payment.Amount, &payment.Commission, &payment.CommissionRuleID, &payment.Status, &payment.PaymentType, &payment.Description, &payment.FraudScore, &payment.ApprovedBy, &payment.RejectionReason, &payment.CreatedAt, &payment.ProcessedAt)
+	err := row.Scan(&payment.ID, &payment.SenderID, &payment.RecipientID, &payment.SenderFullName, &payment.RecipientFullName, &payment.Amount, &payment.Commission, &payment.CommissionRuleID, &payment.Status, &payment.PaymentType, &payment.Description, &payment.FraudScore, &payment.ApprovedBy, &payment.RejectionReason, &payment.CreatedAt, &payment.ProcessedAt)
 	return payment, err
 }
 

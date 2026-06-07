@@ -42,6 +42,8 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/login", s.login)
 
 	mux.Handle("GET /api/auth/me", s.authenticated(http.HandlerFunc(s.me)))
+	mux.Handle("GET /api/users/by-email", s.authenticated(http.HandlerFunc(s.userByEmail)))
+	mux.Handle("GET /api/users/{id}", s.authenticated(http.HandlerFunc(s.userByID)))
 	mux.Handle("POST /api/payments", s.authenticated(http.HandlerFunc(s.createPayment)))
 	mux.Handle("POST /api/payments/by-email", s.authenticated(http.HandlerFunc(s.createPaymentByEmail)))
 	mux.Handle("GET /api/payments", s.authenticated(http.HandlerFunc(s.listPayments)))
@@ -55,6 +57,7 @@ func (s Server) Routes() http.Handler {
 	mux.Handle("POST /api/banker/reject/{id}", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.rejectPayment))))
 	mux.Handle("GET /api/admin/users", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUsers))))
 	mux.Handle("POST /api/admin/users", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminCreateUser))))
+	mux.Handle("PUT /api/admin/users/{id}/limits", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUpdateUserLimits))))
 	mux.Handle("GET /api/admin/stats", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminStats))))
 	mux.Handle("GET /api/admin/audit", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminAudit))))
 	mux.Handle("GET /api/admin/bankers/{id}/history", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminBankerHistory))))
@@ -190,6 +193,41 @@ func (s Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, currentUser(r))
 }
 
+func (s Server) userByID(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	user, err := s.store.PublicUserByID(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, "user not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (s Server) userByEmail(w http.ResponseWriter, r *http.Request) {
+	email := strings.TrimSpace(r.URL.Query().Get("email"))
+	if email == "" {
+		writeError(w, http.StatusBadRequest, "email is required")
+		return
+	}
+	user, err := s.store.PublicUserByEmail(r.Context(), email)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, "user not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
 func clientIP(r *http.Request) string {
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
 		parts := strings.Split(forwarded, ",")
@@ -244,7 +282,7 @@ func (s Server) createPaymentByEmail(w http.ResponseWriter, r *http.Request) {
 	if req.PaymentType == "" {
 		req.PaymentType = "SINGLE"
 	}
-	recipient, err := s.store.UserByEmail(r.Context(), recipientEmail)
+	recipient, err := s.store.PublicUserByEmail(r.Context(), recipientEmail)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -453,6 +491,40 @@ func (s Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, user)
+}
+
+type updateLimitsRequest struct {
+	DailyLimit   int64 `json:"daily_limit"`
+	MonthlyLimit int64 `json:"monthly_limit"`
+}
+
+func (s Server) adminUpdateUserLimits(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req updateLimitsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.DailyLimit <= 0 || req.MonthlyLimit <= 0 {
+		writeError(w, http.StatusBadRequest, "daily_limit and monthly_limit must be positive")
+		return
+	}
+	if req.DailyLimit > req.MonthlyLimit {
+		writeError(w, http.StatusBadRequest, "daily_limit cannot be greater than monthly_limit")
+		return
+	}
+	user, err := s.store.UpdateUserLimits(r.Context(), id, req.DailyLimit, req.MonthlyLimit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
 }
 
 func (s Server) adminStats(w http.ResponseWriter, r *http.Request) {

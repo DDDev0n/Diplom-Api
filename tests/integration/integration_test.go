@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -22,15 +23,20 @@ type authResponse struct {
 }
 
 type user struct {
-	ID int64 `json:"id"`
+	ID       int64  `json:"id"`
+	Email    string `json:"email"`
+	FullName string `json:"full_name"`
 }
 
 type payment struct {
-	ID          int64  `json:"id"`
-	RecipientID int64  `json:"recipient_id"`
-	Status      string `json:"status"`
-	FraudScore  int    `json:"fraud_score"`
-	ProcessedAt string `json:"processed_at"`
+	ID                int64  `json:"id"`
+	SenderID          int64  `json:"sender_id"`
+	RecipientID       int64  `json:"recipient_id"`
+	SenderFullName    string `json:"sender_full_name"`
+	RecipientFullName string `json:"recipient_full_name"`
+	Status            string `json:"status"`
+	FraudScore        int    `json:"fraud_score"`
+	ProcessedAt       string `json:"processed_at"`
 }
 
 func TestAPIHealthSwaggerAndMetrics(t *testing.T) {
@@ -100,6 +106,21 @@ func TestPaymentFlowThroughAPIAndQueue(t *testing.T) {
 	if got.ID != created.ID {
 		t.Fatalf("payment id = %d, want %d", got.ID, created.ID)
 	}
+	if got.SenderID != sender.User.ID || got.SenderFullName != "Integration Sender" {
+		t.Fatalf("payment sender = id %d name %q, want id %d name Integration Sender", got.SenderID, got.SenderFullName, sender.User.ID)
+	}
+	if got.RecipientID != recipient.User.ID || got.RecipientFullName != "Integration Recipient" {
+		t.Fatalf("payment recipient = id %d name %q, want id %d name Integration Recipient", got.RecipientID, got.RecipientFullName, recipient.User.ID)
+	}
+
+	foundByEmail := getPublicUserByEmail(t, client, api, sender.Token, recipientEmail)
+	if foundByEmail.ID != recipient.User.ID || foundByEmail.FullName != "Integration Recipient" {
+		t.Fatalf("found by email = %+v, want recipient id %d", foundByEmail, recipient.User.ID)
+	}
+	foundByID := getPublicUserByID(t, client, api, sender.Token, recipient.User.ID)
+	if foundByID.Email != recipientEmail || foundByID.FullName != "Integration Recipient" {
+		t.Fatalf("found by id = %+v, want email %s", foundByID, recipientEmail)
+	}
 
 	createdByEmail := postPaymentByEmail(t, client, api, sender.Token, map[string]any{
 		"recipient_email": recipientEmail,
@@ -115,6 +136,9 @@ func TestPaymentFlowThroughAPIAndQueue(t *testing.T) {
 	}
 	if createdByEmail.RecipientID != recipient.User.ID {
 		t.Fatalf("payment by email recipient id = %d, want %d", createdByEmail.RecipientID, recipient.User.ID)
+	}
+	if createdByEmail.RecipientFullName != "Integration Recipient" {
+		t.Fatalf("payment by email recipient name = %q, want Integration Recipient", createdByEmail.RecipientFullName)
 	}
 
 	assertStatus(t, client, http.MethodGet, api+"/api/payments", bearer(sender.Token), http.StatusOK, fmt.Sprintf(`"id":%d`, created.ID))
@@ -202,6 +226,20 @@ func postPaymentByEmail(t *testing.T, client *http.Client, api string, token str
 	t.Helper()
 	var out payment
 	doJSON(t, client, http.MethodPost, api+"/api/payments/by-email", bearer(token), payload, http.StatusCreated, &out)
+	return out
+}
+
+func getPublicUserByEmail(t *testing.T, client *http.Client, api string, token string, email string) user {
+	t.Helper()
+	var out user
+	doJSON(t, client, http.MethodGet, fmt.Sprintf("%s/api/users/by-email?email=%s", api, url.QueryEscape(email)), bearer(token), nil, http.StatusOK, &out)
+	return out
+}
+
+func getPublicUserByID(t *testing.T, client *http.Client, api string, token string, id int64) user {
+	t.Helper()
+	var out user
+	doJSON(t, client, http.MethodGet, fmt.Sprintf("%s/api/users/%d", api, id), bearer(token), nil, http.StatusOK, &out)
 	return out
 }
 

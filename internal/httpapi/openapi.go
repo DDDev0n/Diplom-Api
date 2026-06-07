@@ -43,6 +43,7 @@ const openapiSpec = `{
     { "name": "Health" },
     { "name": "Monitoring" },
     { "name": "Auth" },
+    { "name": "Users" },
     { "name": "Payments" },
     { "name": "Banker" },
     { "name": "Admin" }
@@ -165,6 +166,51 @@ const openapiSpec = `{
             }
           },
           "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/users/by-email": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "Найти пользователя по email",
+        "description": "Возвращает только публичные поля пользователя для сценария перевода по email.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "email", "in": "query", "required": true, "schema": { "type": "string", "format": "email" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Публичный профиль пользователя",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicUser" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/users/{id}": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "Получить публичные данные пользователя",
+        "description": "Возвращает id, email и ФИО без баланса, лимитов и служебных полей.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "responses": {
+          "200": {
+            "description": "Публичный профиль пользователя",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicUser" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     },
@@ -407,6 +453,41 @@ const openapiSpec = `{
           "400": { "$ref": "#/components/responses/BadRequest" },
           "403": { "$ref": "#/components/responses/Forbidden" },
           "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/admin/users/{id}/limits": {
+      "put": {
+        "tags": ["Admin"],
+        "summary": "Изменить лимиты пользователя",
+        "description": "Доступно только ADMIN. Обновляет дневной и месячный лимиты пользователя.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UpdateLimitsRequest" },
+              "example": {
+                "daily_limit": 10000000,
+                "monthly_limit": 100000000
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Лимиты обновлены",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/User" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     },
@@ -694,6 +775,32 @@ const openapiSpec = `{
           "created_at": { "type": "string", "format": "date-time" }
         }
       },
+      "PublicUser": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "email": { "type": "string", "format": "email" },
+          "full_name": { "type": "string" }
+        }
+      },
+      "UpdateLimitsRequest": {
+        "type": "object",
+        "required": ["daily_limit", "monthly_limit"],
+        "properties": {
+          "daily_limit": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Дневной лимит в копейках"
+          },
+          "monthly_limit": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Месячный лимит в копейках"
+          }
+        }
+      },
       "CreatePaymentRequest": {
         "type": "object",
         "required": ["recipient_id", "amount"],
@@ -738,6 +845,8 @@ const openapiSpec = `{
           "id": { "type": "integer", "format": "int64" },
           "sender_id": { "type": "integer", "format": "int64" },
           "recipient_id": { "type": "integer", "format": "int64" },
+          "sender_full_name": { "type": "string" },
+          "recipient_full_name": { "type": "string" },
           "amount": { "type": "integer", "format": "int64" },
           "commission": { "type": "integer", "format": "int64" },
           "commission_rule_id": { "type": "integer", "format": "int64" },
