@@ -380,6 +380,38 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		return payment, errors.New("insufficient balance")
 	}
 
+	// Check daily limit
+	var dailySpent int64
+	err = tx.QueryRow(ctx, `
+		select coalesce(sum(amount_cents + commission_cents), 0)
+		from payments
+		where sender_id=$1
+		  and status in ($2, $3)
+		  and created_at::date = current_date
+	`, payment.SenderID, StatusApproved, StatusCompleted).Scan(&dailySpent)
+	if err != nil {
+		return payment, err
+	}
+	if dailySpent+payment.Amount+payment.Commission > sender.DailyLimit {
+		return payment, errors.New("daily limit exceeded")
+	}
+
+	// Check monthly limit
+	var monthlySpent int64
+	err = tx.QueryRow(ctx, `
+		select coalesce(sum(amount_cents + commission_cents), 0)
+		from payments
+		where sender_id=$1
+		  and status in ($2, $3)
+		  and date_trunc('month', created_at) = date_trunc('month', current_timestamp)
+	`, payment.SenderID, StatusApproved, StatusCompleted).Scan(&monthlySpent)
+	if err != nil {
+		return payment, err
+	}
+	if monthlySpent+payment.Amount+payment.Commission > sender.MonthlyLimit {
+		return payment, errors.New("monthly limit exceeded")
+	}
+
 	err = tx.QueryRow(ctx, `
 		insert into payments (sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type, description)
 		values ($1, $2, $3, $4, $5, $6, $7, $8)
