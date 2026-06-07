@@ -83,43 +83,52 @@ func (c *Client) Score(ctx context.Context, payment store.Payment) (Result, erro
 		PaymentType:    mapPaymentType(payment.PaymentType),
 		IdempotencyKey: fmt.Sprintf("local-payment-%d", payment.ID),
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.processPath, bytes.NewReader(body))
-	if err != nil {
-		return Result{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	token, err := c.token(ctx)
-	if err != nil {
-		return Result{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return Result{}, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode == http.StatusTooManyRequests {
-		reason := strings.TrimSpace(string(raw))
-		if reason == "" {
-			reason = "processing rate limit exceeded"
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.processPath, bytes.NewReader(body))
+		if err != nil {
+			return Result{}, err
 		}
-		return Result{Status: store.StatusRejected, Reason: reason}, nil
-	}
-	if resp.StatusCode >= 300 {
-		return Result{}, fmt.Errorf("processing status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
+		req.Header.Set("Content-Type", "application/json")
+		token, err := c.token(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
 
-	var result Result
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return Result{}, err
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return Result{}, err
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+
+		if resp.StatusCode == http.StatusUnauthorized && c.authToken == "" && attempt == 0 {
+			c.clearCachedToken(token)
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			reason := strings.TrimSpace(string(raw))
+			if reason == "" {
+				reason = "processing rate limit exceeded"
+			}
+			return Result{Status: store.StatusRejected, Reason: reason}, nil
+		}
+		if resp.StatusCode >= 300 {
+			return Result{}, fmt.Errorf("processing status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		}
+
+		var result Result
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return Result{}, err
+		}
+		if result.Status == "" {
+			return Result{}, fmt.Errorf("processing response does not contain status")
+		}
+		result.Status = mapProcessingStatus(result.Status)
+		return result, nil
 	}
-	if result.Status == "" {
-		return Result{}, fmt.Errorf("processing response does not contain status")
-	}
-	result.Status = mapProcessingStatus(result.Status)
-	return result, nil
+	return Result{}, fmt.Errorf("processing request failed")
 }
 
 func (c *Client) token(ctx context.Context) (string, error) {
@@ -162,6 +171,14 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	}
 	c.cachedToken = out.Token
 	return c.cachedToken, nil
+}
+
+func (c *Client) clearCachedToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cachedToken == token {
+		c.cachedToken = ""
+	}
 }
 
 type processingRequest struct {

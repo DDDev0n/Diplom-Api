@@ -137,6 +137,67 @@ func TestCreatePaymentBlocksSenderAndExposesBlockInfoOnCriticalFraud(t *testing.
 	}
 }
 
+func TestUnblockUserResetsFraudHistoryCutoff(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := openTestStore(t, ctx)
+
+	sender := createFraudTestUser(t, ctx, s, "reset", 10_000_000)
+	recipient := createFraudTestUser(t, ctx, s, "recipient-reset", 0)
+	admin := createFraudTestUser(t, ctx, s, "admin-reset", 0)
+	backdateUser(t, ctx, s, sender.ID, 2*time.Hour)
+	backdateUser(t, ctx, s, admin.ID, 2*time.Hour)
+	setUserRole(t, ctx, s, admin.ID, RoleAdmin)
+
+	t.Cleanup(func() {
+		cleanupFraudTestUsers(t, ctx, s, sender.ID, recipient.ID, admin.ID)
+	})
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.CreatePayment(ctx, Payment{
+			SenderID:    sender.ID,
+			RecipientID: recipient.ID,
+			Amount:      10_000,
+			PaymentType: "SINGLE",
+			Description: fmt.Sprintf("pre unblock payment %d", i+1),
+		}); err != nil {
+			t.Fatalf("CreatePayment before unblock #%d returned error: %v", i+1, err)
+		}
+	}
+
+	if _, err := s.UnblockUser(ctx, sender.ID, admin.ID); err != nil {
+		t.Fatalf("UnblockUser returned error: %v", err)
+	}
+	info, err := s.GetBlockInfo(ctx, sender.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsBlocked {
+		t.Fatalf("sender is still blocked after unblock: %+v", info)
+	}
+	if info.SuspiciousPayments != 0 || info.RejectedPayments != 0 || len(info.SuspiciousOperations) != 0 {
+		t.Fatalf("fraud info after unblock = %+v, want reset counters", info)
+	}
+
+	payment, err := s.CreatePayment(ctx, Payment{
+		SenderID:    sender.ID,
+		RecipientID: recipient.ID,
+		Amount:      10_000,
+		PaymentType: "SINGLE",
+		Description: "payment after unblock",
+	})
+	if err != nil {
+		t.Fatalf("CreatePayment after unblock returned error: %v", err)
+	}
+	if payment.Status != StatusPending {
+		t.Fatalf("payment after unblock status = %q, want %q", payment.Status, StatusPending)
+	}
+	if payment.FraudScore != 0 {
+		t.Fatalf("payment after unblock fraud score = %d, want 0", payment.FraudScore)
+	}
+}
+
 func openTestStore(t *testing.T, ctx context.Context) *Store {
 	t.Helper()
 
@@ -189,6 +250,17 @@ func backdateUser(t *testing.T, ctx context.Context, s *Store, userID int64, age
 	`, userID, fmt.Sprintf("%d seconds", int64(age.Seconds())))
 	if err != nil {
 		t.Fatalf("failed to backdate user %d: %v", userID, err)
+	}
+}
+
+func setUserRole(t *testing.T, ctx context.Context, s *Store, userID int64, role string) {
+	t.Helper()
+
+	_, err := s.pool.Exec(ctx, `
+		update users set role=$2 where id=$1
+	`, userID, role)
+	if err != nil {
+		t.Fatalf("failed to set user %d role: %v", userID, err)
 	}
 }
 

@@ -94,6 +94,49 @@ func TestClientUsesConfiguredBearerTokenWithoutLogin(t *testing.T) {
 	}
 }
 
+func TestClientRefreshesCachedTokenAfterUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	var loginCalls int
+	var processCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/login":
+			loginCalls++
+			token := "expired-token"
+			if loginCalls > 1 {
+				token = "fresh-token"
+			}
+			_ = json.NewEncoder(w).Encode(loginResponse{Token: token})
+		case "/api/v1/payments/process":
+			processCalls++
+			if got := r.Header.Get("Authorization"); got == "Bearer expired-token" {
+				http.Error(w, "invalid token", http.StatusUnauthorized)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer fresh-token" {
+				t.Fatalf("Authorization = %q, want Bearer fresh-token", got)
+			}
+			_ = json.NewEncoder(w).Encode(Result{Status: "COMPLETED", FraudScore: 3})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{BaseURL: server.URL})
+	result, err := client.Score(context.Background(), store.Payment{ID: 1, SenderID: 1, RecipientID: 2, Amount: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != store.StatusCompleted || result.FraudScore != 3 {
+		t.Fatalf("result = %+v", result)
+	}
+	if loginCalls != 2 || processCalls != 2 {
+		t.Fatalf("loginCalls = %d, processCalls = %d", loginCalls, processCalls)
+	}
+}
+
 func TestClientMapsProcessingRateLimitToRejectedResult(t *testing.T) {
 	t.Parallel()
 

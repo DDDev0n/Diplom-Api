@@ -59,6 +59,8 @@ func (s Server) Routes() http.Handler {
 	mux.Handle("GET /api/admin/users", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUsers))))
 	mux.Handle("POST /api/admin/users", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminCreateUser))))
 	mux.Handle("PUT /api/admin/users/{id}/limits", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUpdateUserLimits))))
+	mux.Handle("PUT /api/admin/users/{id}/block", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminBlockUser))))
+	mux.Handle("PUT /api/admin/users/{id}/unblock", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUnblockUser))))
 	mux.Handle("GET /api/admin/stats", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminStats))))
 	mux.Handle("GET /api/admin/audit", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminAudit))))
 	mux.Handle("GET /api/admin/bankers/{id}/history", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminBankerHistory))))
@@ -539,6 +541,56 @@ func (s Server) adminUpdateUserLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, err := s.store.UpdateUserLimits(r.Context(), id, req.DailyLimit, req.MonthlyLimit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+type blockUserRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (s Server) adminBlockUser(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req blockUserRequest
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "Blocked by administrator"
+	}
+
+	user, err := s.store.BlockUser(r.Context(), id, currentUser(r).ID, reason)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (s Server) adminUnblockUser(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+
+	user, err := s.store.UnblockUser(r.Context(), id, currentUser(r).ID)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, pgx.ErrNoRows) {

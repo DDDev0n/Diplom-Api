@@ -491,6 +491,60 @@ const openapiSpec = `{
         }
       }
     },
+    "/api/admin/users/{id}/block": {
+      "put": {
+        "tags": ["Admin"],
+        "summary": "Заблокировать пользователя",
+        "description": "Доступно только ADMIN. Устанавливает is_blocked=true и сохраняет причину блокировки.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/BlockUserRequest" },
+              "example": { "reason": "Suspicious activity" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Пользователь заблокирован",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/User" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/admin/users/{id}/unblock": {
+      "put": {
+        "tags": ["Admin"],
+        "summary": "Разблокировать пользователя",
+        "description": "Доступно только ADMIN. Снимает блокировку и сбрасывает fraud-историю: дальнейшие fraud-проверки учитывают операции только с момента разблокировки.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "responses": {
+          "200": {
+            "description": "Пользователь разблокирован",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/User" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/api/banker/clients": {
       "get": {
         "tags": ["Banker"],
@@ -772,6 +826,8 @@ const openapiSpec = `{
           "daily_limit": { "type": "integer", "format": "int64" },
           "monthly_limit": { "type": "integer", "format": "int64" },
           "is_blocked": { "type": "boolean" },
+          "block_reason": { "type": "string" },
+          "blocked_at": { "type": "string", "format": "date-time" },
           "created_at": { "type": "string", "format": "date-time" }
         }
       },
@@ -799,6 +855,12 @@ const openapiSpec = `{
             "minimum": 1,
             "description": "Месячный лимит в копейках"
           }
+        }
+      },
+      "BlockUserRequest": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string" }
         }
       },
       "CreatePaymentRequest": {
