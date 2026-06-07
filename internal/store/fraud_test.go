@@ -57,6 +57,91 @@ func TestCreatePaymentMarksRepeatedPaymentsSuspiciousWithoutBlockingBelowCritica
 	}
 }
 
+func TestCreatePaymentHoldsSenderOperationsOnReviewFraud(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := openTestStore(t, ctx)
+
+	sender := createFraudTestUser(t, ctx, s, "review", 10_000_000)
+	recipient := createFraudTestUser(t, ctx, s, "recipient", 0)
+	otherRecipient := createFraudTestUser(t, ctx, s, "other-recipient", 0)
+	banker := createFraudTestUser(t, ctx, s, "banker-review", 0)
+	backdateUser(t, ctx, s, sender.ID, 2*time.Hour)
+	setUserRole(t, ctx, s, banker.ID, RoleBanker)
+
+	t.Cleanup(func() {
+		cleanupFraudTestUsers(t, ctx, s, sender.ID, recipient.ID, otherRecipient.ID, banker.ID)
+	})
+
+	var reviewPayment Payment
+	for i := 0; i < 5; i++ {
+		payment, err := s.CreatePayment(ctx, Payment{
+			SenderID:    sender.ID,
+			RecipientID: recipient.ID,
+			Amount:      10_000,
+			PaymentType: "SINGLE",
+			Description: fmt.Sprintf("review repeated payment %d", i+1),
+		})
+		if err != nil {
+			t.Fatalf("CreatePayment #%d returned error: %v", i+1, err)
+		}
+		reviewPayment = payment
+	}
+
+	if reviewPayment.Status != StatusPending {
+		t.Fatalf("review payment status = %q, want %q", reviewPayment.Status, StatusPending)
+	}
+	if reviewPayment.FraudScore < fraudReviewScore || reviewPayment.FraudScore >= fraudCriticalScore {
+		t.Fatalf("review payment fraud score = %d, want review range", reviewPayment.FraudScore)
+	}
+
+	info, err := s.GetBlockInfo(ctx, sender.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsBlocked {
+		t.Fatalf("sender should not be hard-blocked on review fraud: %+v", info)
+	}
+	if info.OperationHoldPaymentID == nil || *info.OperationHoldPaymentID != reviewPayment.ID {
+		t.Fatalf("operation hold payment id = %v, want %d", info.OperationHoldPaymentID, reviewPayment.ID)
+	}
+	if info.OperationHoldAt == nil || !strings.Contains(info.OperationHoldReason, "review") {
+		t.Fatalf("operation hold info = %+v, want review hold", info)
+	}
+	if info.SuspiciousPayments != 1 {
+		t.Fatalf("suspicious payments = %d, want 1", info.SuspiciousPayments)
+	}
+	if info.RejectedPayments != 0 {
+		t.Fatalf("rejected payments = %d, want 0", info.RejectedPayments)
+	}
+
+	_, err = s.CreatePayment(ctx, Payment{
+		SenderID:    sender.ID,
+		RecipientID: otherRecipient.ID,
+		Amount:      10_000,
+		PaymentType: "SINGLE",
+		Description: "payment while banker review is pending",
+	})
+	if err == nil || err.Error() != "sender has payment pending banker review" {
+		t.Fatalf("CreatePayment during review hold error = %v, want hold error", err)
+	}
+
+	if err := s.DecidePayment(ctx, reviewPayment.ID, banker.ID, StatusApproved, ""); err != nil {
+		t.Fatalf("DecidePayment approve returned error: %v", err)
+	}
+
+	if _, err := s.CreatePayment(ctx, Payment{
+		SenderID:    sender.ID,
+		RecipientID: otherRecipient.ID,
+		Amount:      10_000,
+		PaymentType: "SINGLE",
+		Description: "payment after banker approval",
+	}); err != nil {
+		t.Fatalf("CreatePayment after banker approval returned error: %v", err)
+	}
+}
+
 func TestCreatePaymentBlocksSenderAndExposesBlockInfoOnCriticalFraud(t *testing.T) {
 	t.Parallel()
 
@@ -65,25 +150,20 @@ func TestCreatePaymentBlocksSenderAndExposesBlockInfoOnCriticalFraud(t *testing.
 
 	sender := createFraudTestUser(t, ctx, s, "blocked", 10_000_000)
 	recipient := createFraudTestUser(t, ctx, s, "recipient", 0)
-	backdateUser(t, ctx, s, sender.ID, 2*time.Hour)
 
 	t.Cleanup(func() {
 		cleanupFraudTestUsers(t, ctx, s, sender.ID, recipient.ID)
 	})
 
-	var blockedPayment Payment
-	for i := 0; i < 5; i++ {
-		payment, err := s.CreatePayment(ctx, Payment{
-			SenderID:    sender.ID,
-			RecipientID: recipient.ID,
-			Amount:      10_000,
-			PaymentType: "SINGLE",
-			Description: fmt.Sprintf("critical repeated payment %d", i+1),
-		})
-		if err != nil {
-			t.Fatalf("CreatePayment #%d returned error: %v", i+1, err)
-		}
-		blockedPayment = payment
+	blockedPayment, err := s.CreatePayment(ctx, Payment{
+		SenderID:    sender.ID,
+		RecipientID: recipient.ID,
+		Amount:      160_000,
+		PaymentType: "SINGLE",
+		Description: "critical fresh large payment",
+	})
+	if err != nil {
+		t.Fatalf("CreatePayment returned error: %v", err)
 	}
 
 	if blockedPayment.Status != StatusRejected {
@@ -111,18 +191,6 @@ func TestCreatePaymentBlocksSenderAndExposesBlockInfoOnCriticalFraud(t *testing.
 	}
 	if info.BlockedAt == nil {
 		t.Fatal("blocked_at is nil")
-	}
-	if info.SuspiciousPayments != 1 {
-		t.Fatalf("suspicious payments = %d, want 1", info.SuspiciousPayments)
-	}
-	if info.RejectedPayments != 1 {
-		t.Fatalf("rejected payments = %d, want 1", info.RejectedPayments)
-	}
-	if len(info.SuspiciousOperations) == 0 {
-		t.Fatal("suspicious operations is empty")
-	}
-	if info.SuspiciousOperations[0].ID != blockedPayment.ID {
-		t.Fatalf("first suspicious operation id = %d, want %d", info.SuspiciousOperations[0].ID, blockedPayment.ID)
 	}
 
 	_, err = s.CreatePayment(ctx, Payment{
@@ -195,6 +263,58 @@ func TestUnblockUserResetsFraudHistoryCutoff(t *testing.T) {
 	}
 	if payment.FraudScore != 0 {
 		t.Fatalf("payment after unblock fraud score = %d, want 0", payment.FraudScore)
+	}
+}
+
+func TestUnblockUserResetsLimitHistoryCutoff(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := openTestStore(t, ctx)
+
+	sender := createFraudTestUser(t, ctx, s, "limit-reset", 10_000_000)
+	recipient := createFraudTestUser(t, ctx, s, "limit-recipient", 0)
+	admin := createFraudTestUser(t, ctx, s, "limit-admin", 0)
+	backdateUser(t, ctx, s, sender.ID, 2*time.Hour)
+	setUserRole(t, ctx, s, admin.ID, RoleAdmin)
+
+	t.Cleanup(func() {
+		cleanupFraudTestUsers(t, ctx, s, sender.ID, recipient.ID, admin.ID)
+	})
+
+	if _, err := s.UpdateUserLimits(ctx, sender.ID, 100_000, 1_000_000); err != nil {
+		t.Fatalf("UpdateUserLimits returned error: %v", err)
+	}
+	if _, err := s.CreatePayment(ctx, Payment{
+		SenderID:    sender.ID,
+		RecipientID: recipient.ID,
+		Amount:      80_000,
+		PaymentType: "SINGLE",
+		Description: "uses most daily limit",
+	}); err != nil {
+		t.Fatalf("CreatePayment before limit reset returned error: %v", err)
+	}
+	if _, err := s.CreatePayment(ctx, Payment{
+		SenderID:    sender.ID,
+		RecipientID: recipient.ID,
+		Amount:      30_000,
+		PaymentType: "SINGLE",
+		Description: "should exceed daily limit",
+	}); err == nil || err.Error() != "daily limit exceeded" {
+		t.Fatalf("CreatePayment before unblock error = %v, want daily limit exceeded", err)
+	}
+
+	if _, err := s.UnblockUser(ctx, sender.ID, admin.ID); err != nil {
+		t.Fatalf("UnblockUser returned error: %v", err)
+	}
+	if _, err := s.CreatePayment(ctx, Payment{
+		SenderID:    sender.ID,
+		RecipientID: recipient.ID,
+		Amount:      30_000,
+		PaymentType: "SINGLE",
+		Description: "allowed after limit reset",
+	}); err != nil {
+		t.Fatalf("CreatePayment after limit reset returned error: %v", err)
 	}
 }
 

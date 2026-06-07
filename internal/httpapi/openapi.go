@@ -828,6 +828,9 @@ const openapiSpec = `{
           "is_blocked": { "type": "boolean" },
           "block_reason": { "type": "string" },
           "blocked_at": { "type": "string", "format": "date-time" },
+          "operation_hold_payment_id": { "type": "integer", "format": "int64" },
+          "operation_hold_reason": { "type": "string" },
+          "operation_hold_at": { "type": "string", "format": "date-time" },
           "created_at": { "type": "string", "format": "date-time" }
         }
       },

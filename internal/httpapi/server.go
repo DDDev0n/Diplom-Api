@@ -328,7 +328,11 @@ func (s Server) createPaymentWithRecipient(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if payment.Status == store.StatusRejected && payment.FraudScore >= 60 {
+	if payment.Status == store.StatusRejected {
+		writeJSON(w, http.StatusCreated, payment)
+		return
+	}
+	if payment.Status == store.StatusPending && payment.FraudScore >= 50 {
 		writeJSON(w, http.StatusCreated, payment)
 		return
 	}
