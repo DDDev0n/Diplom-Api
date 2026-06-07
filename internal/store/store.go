@@ -412,6 +412,56 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		return payment, errors.New("monthly limit exceeded")
 	}
 
+	// Fraud detection: check for suspicious patterns
+	// 1. Count payments to the same recipient in the last 24 hours
+	var recipientPaymentCount int64
+	var recipientPaymentSum int64
+	err = tx.QueryRow(ctx, `
+		select count(*), coalesce(sum(amount_cents), 0)
+		from payments
+		where sender_id=$1
+		  and recipient_id=$2
+		  and status in ($3, $4)
+		  and created_at > now() - interval '24 hours'
+	`, payment.SenderID, payment.RecipientID, StatusApproved, StatusCompleted).Scan(&recipientPaymentCount, &recipientPaymentSum)
+	if err != nil {
+		return payment, err
+	}
+
+	// 2. Check for suspicious patterns
+	fraud_suspicion := 0
+	
+	// Pattern 1: More than 3 payments to same recipient in 24h
+	if recipientPaymentCount >= 3 {
+		fraud_suspicion += 30
+	}
+	
+	// Pattern 2: Very large payment (> 500,000 cents = 5000 rubles)
+	if payment.Amount > 50000000 {
+		fraud_suspicion += 25
+	}
+	
+	// Pattern 3: Total sent to recipient in 24h exceeds 1,000,000 cents = 10000 rubles
+	if recipientPaymentSum+payment.Amount > 100000000 {
+		fraud_suspicion += 20
+	}
+
+	// Pattern 4: Many different recipients in last hour
+	var recipientCount int64
+	err = tx.QueryRow(ctx, `
+		select count(distinct recipient_id)
+		from payments
+		where sender_id=$1
+		  and status in ($2, $3)
+		  and created_at > now() - interval '1 hour'
+	`, payment.SenderID, StatusApproved, StatusCompleted).Scan(&recipientCount)
+	if err != nil {
+		return payment, err
+	}
+	if recipientCount >= 5 {
+		fraud_suspicion += 25
+	}
+
 	err = tx.QueryRow(ctx, `
 		insert into payments (sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type, description)
 		values ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -420,6 +470,19 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		Scan(&payment.ID, &payment.FraudScore, &payment.CreatedAt)
 	if err != nil {
 		return payment, err
+	}
+
+	// If fraud suspicion is high, update fraud score for processing system
+	if fraud_suspicion > 0 {
+		_, err = tx.Exec(ctx, `
+			update payments
+			set fraud_score = $2
+			where id = $1
+		`, payment.ID, fraud_suspicion)
+		if err != nil {
+			return payment, err
+		}
+		payment.FraudScore = fraud_suspicion
 	}
 
 	_, err = tx.Exec(ctx, `
