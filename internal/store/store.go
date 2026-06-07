@@ -269,7 +269,7 @@ func (s *Store) UpdateUserLimits(ctx context.Context, userID, dailyLimit, monthl
 		update users
 		set daily_limit_cents=$2, monthly_limit_cents=$3, updated_at=now()
 		where id=$1
-		returning id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
+		returning id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, coalesce(block_reason, ''), blocked_at, created_at
 	`, userID, dailyLimit, monthlyLimit))
 }
 
@@ -508,7 +508,7 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 
 	err = tx.QueryRow(ctx, `
 		insert into payments (sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type, description, fraud_score, rejection_reason, processed_at)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, nullif($10, ''), case when $6 = $11 then now() else null end)
+		values ($1, $2, $3, $4, $5, $6::varchar, $7, $8, $9, nullif($10, ''), case when $6::varchar = $11::varchar then now() else null end)
 		returning id, fraud_score, created_at, processed_at
 	`, payment.SenderID, payment.RecipientID, payment.Amount, payment.Commission, payment.CommissionRuleID, payment.Status, payment.PaymentType, payment.Description, fraud_suspicion, payment.RejectionReason, StatusRejected).
 		Scan(&payment.ID, &payment.FraudScore, &payment.CreatedAt, &payment.ProcessedAt)
