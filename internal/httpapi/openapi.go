@@ -221,6 +221,41 @@ const openapiSpec = `{
         }
       }
     },
+    "/api/payments/by-email": {
+      "post": {
+        "tags": ["Payments"],
+        "summary": "Создать платеж по email получателя",
+        "description": "Находит получателя по email, создает платеж в Go API и отправляет задачу в RabbitMQ.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreatePaymentByEmailRequest" },
+              "example": {
+                "recipient_email": "recipient@test.ru",
+                "amount": 15000000,
+                "description": "Тестовый платеж",
+                "payment_type": "SINGLE"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Платеж создан",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Payment" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/api/payments/{id}": {
       "get": {
         "tags": ["Payments"],
@@ -664,6 +699,25 @@ const openapiSpec = `{
         "required": ["recipient_id", "amount"],
         "properties": {
           "recipient_id": { "type": "integer", "format": "int64" },
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Сумма в копейках"
+          },
+          "description": { "type": "string" },
+          "payment_type": {
+            "type": "string",
+            "enum": ["SINGLE", "RECURRING", "MASS_PAYOUT"],
+            "default": "SINGLE"
+          }
+        }
+      },
+      "CreatePaymentByEmailRequest": {
+        "type": "object",
+        "required": ["recipient_email", "amount"],
+        "properties": {
+          "recipient_email": { "type": "string", "format": "email" },
           "amount": {
             "type": "integer",
             "format": "int64",

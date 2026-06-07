@@ -34,6 +34,15 @@ PostgreSQL metrics - `http://localhost:9187/metrics`.
 System metrics - `http://localhost:9100/metrics`.
 Container metrics - `http://localhost:8081/metrics`.
 
+Основные платежные endpoint:
+
+```text
+POST /api/payments           - создание платежа по recipient_id
+POST /api/payments/by-email  - создание платежа по email получателя
+GET  /api/payments           - список платежей
+GET  /api/payments/{id}      - просмотр платежа
+```
+
 Go worker ходит во внешний processing по HTTPS:
 
 ```bash

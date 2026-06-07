@@ -27,6 +27,7 @@ type user struct {
 
 type payment struct {
 	ID          int64  `json:"id"`
+	RecipientID int64  `json:"recipient_id"`
 	Status      string `json:"status"`
 	FraudScore  int    `json:"fraud_score"`
 	ProcessedAt string `json:"processed_at"`
@@ -66,8 +67,9 @@ func TestPaymentFlowThroughAPIAndQueue(t *testing.T) {
 	waitForAPI(t, client, api)
 
 	suffix := time.Now().UnixNano()
+	recipientEmail := fmt.Sprintf("recipient-%d@test.local", suffix)
 	recipient := register(t, client, api, map[string]any{
-		"email":     fmt.Sprintf("recipient-%d@test.local", suffix),
+		"email":     recipientEmail,
 		"password":  "123456",
 		"full_name": "Integration Recipient",
 		"role":      "CLIENT",
@@ -97,6 +99,22 @@ func TestPaymentFlowThroughAPIAndQueue(t *testing.T) {
 	got := getPayment(t, client, api, sender.Token, created.ID)
 	if got.ID != created.ID {
 		t.Fatalf("payment id = %d, want %d", got.ID, created.ID)
+	}
+
+	createdByEmail := postPaymentByEmail(t, client, api, sender.Token, map[string]any{
+		"recipient_email": recipientEmail,
+		"amount":          23456,
+		"description":     "integration test payment by email",
+		"payment_type":    "SINGLE",
+	})
+	if createdByEmail.ID == 0 {
+		t.Fatal("created by email payment id is empty")
+	}
+	if createdByEmail.Status != "PENDING" {
+		t.Fatalf("new payment by email status = %q, want PENDING", createdByEmail.Status)
+	}
+	if createdByEmail.RecipientID != recipient.User.ID {
+		t.Fatalf("payment by email recipient id = %d, want %d", createdByEmail.RecipientID, recipient.User.ID)
 	}
 
 	assertStatus(t, client, http.MethodGet, api+"/api/payments", bearer(sender.Token), http.StatusOK, fmt.Sprintf(`"id":%d`, created.ID))
@@ -177,6 +195,13 @@ func postPayment(t *testing.T, client *http.Client, api string, token string, pa
 	t.Helper()
 	var out payment
 	doJSON(t, client, http.MethodPost, api+"/api/payments", bearer(token), payload, http.StatusCreated, &out)
+	return out
+}
+
+func postPaymentByEmail(t *testing.T, client *http.Client, api string, token string, payload map[string]any) payment {
+	t.Helper()
+	var out payment
+	doJSON(t, client, http.MethodPost, api+"/api/payments/by-email", bearer(token), payload, http.StatusCreated, &out)
 	return out
 }
 

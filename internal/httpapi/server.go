@@ -43,6 +43,7 @@ func (s Server) Routes() http.Handler {
 
 	mux.Handle("GET /api/auth/me", s.authenticated(http.HandlerFunc(s.me)))
 	mux.Handle("POST /api/payments", s.authenticated(http.HandlerFunc(s.createPayment)))
+	mux.Handle("POST /api/payments/by-email", s.authenticated(http.HandlerFunc(s.createPaymentByEmail)))
 	mux.Handle("GET /api/payments", s.authenticated(http.HandlerFunc(s.listPayments)))
 	mux.Handle("GET /api/payments/{id}", s.authenticated(http.HandlerFunc(s.getPayment)))
 	mux.Handle("GET /api/banker/queue", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.bankerQueue))))
@@ -208,6 +209,13 @@ type createPaymentRequest struct {
 	PaymentType string `json:"payment_type"`
 }
 
+type createPaymentByEmailRequest struct {
+	RecipientEmail string `json:"recipient_email"`
+	Amount         int64  `json:"amount"`
+	Description    string `json:"description"`
+	PaymentType    string `json:"payment_type"`
+}
+
 func (s Server) createPayment(w http.ResponseWriter, r *http.Request) {
 	var req createPaymentRequest
 	if !decodeJSON(w, r, &req) {
@@ -220,13 +228,42 @@ func (s Server) createPayment(w http.ResponseWriter, r *http.Request) {
 	if req.PaymentType == "" {
 		req.PaymentType = "SINGLE"
 	}
+	s.createPaymentWithRecipient(w, r, req.RecipientID, req.Amount, req.PaymentType, req.Description)
+}
+
+func (s Server) createPaymentByEmail(w http.ResponseWriter, r *http.Request) {
+	var req createPaymentByEmailRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	recipientEmail := strings.TrimSpace(req.RecipientEmail)
+	if recipientEmail == "" || req.Amount <= 0 {
+		writeError(w, http.StatusBadRequest, "recipient_email and positive amount are required")
+		return
+	}
+	if req.PaymentType == "" {
+		req.PaymentType = "SINGLE"
+	}
+	recipient, err := s.store.UserByEmail(r.Context(), recipientEmail)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, "recipient not found")
+		return
+	}
+	s.createPaymentWithRecipient(w, r, recipient.ID, req.Amount, req.PaymentType, req.Description)
+}
+
+func (s Server) createPaymentWithRecipient(w http.ResponseWriter, r *http.Request, recipientID int64, amount int64, paymentType string, description string) {
 	user := currentUser(r)
 	payment, err := s.store.CreatePayment(r.Context(), store.Payment{
 		SenderID:    user.ID,
-		RecipientID: req.RecipientID,
-		Amount:      req.Amount,
-		PaymentType: req.PaymentType,
-		Description: req.Description,
+		RecipientID: recipientID,
+		Amount:      amount,
+		PaymentType: paymentType,
+		Description: description,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
