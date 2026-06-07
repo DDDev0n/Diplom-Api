@@ -42,6 +42,7 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/login", s.login)
 
 	mux.Handle("GET /api/auth/me", s.authenticated(http.HandlerFunc(s.me)))
+	mux.Handle("GET /api/auth/block-status", s.authenticated(http.HandlerFunc(s.getBlockStatus)))
 	mux.Handle("GET /api/users/by-email", s.authenticated(http.HandlerFunc(s.userByEmail)))
 	mux.Handle("GET /api/users/{id}", s.authenticated(http.HandlerFunc(s.userByID)))
 	mux.Handle("POST /api/payments", s.authenticated(http.HandlerFunc(s.createPayment)))
@@ -168,7 +169,15 @@ func (s Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user.IsBlocked {
-		writeError(w, http.StatusForbidden, "user is blocked")
+		blockInfo, err := s.store.GetBlockInfo(r.Context(), user.ID)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "user is blocked")
+			return
+		}
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":      "user is blocked",
+			"block_info": blockInfo,
+		})
 		return
 	}
 	token, err := auth.CreateToken(s.cfg.JWTSecret, user.ID, user.Role)
@@ -191,6 +200,16 @@ func (s Server) login(w http.ResponseWriter, r *http.Request) {
 
 func (s Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, currentUser(r))
+}
+
+func (s Server) getBlockStatus(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	blockInfo, err := s.store.GetBlockInfo(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, blockInfo)
 }
 
 func (s Server) userByID(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +324,10 @@ func (s Server) createPaymentWithRecipient(w http.ResponseWriter, r *http.Reques
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if payment.Status == store.StatusRejected && payment.FraudScore >= 60 {
+		writeJSON(w, http.StatusCreated, payment)
 		return
 	}
 	if err := s.publisher.PublishPayment(r.Context(), payment.ID); err != nil {

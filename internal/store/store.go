@@ -22,22 +22,39 @@ const (
 	StatusCancelled = "CANCELLED"
 )
 
+const (
+	fraudReviewScore   = 50
+	fraudCriticalScore = 60
+)
+
 type Store struct {
 	pool *pgxpool.Pool
 }
 
 type User struct {
-	ID           int64     `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	FullName     string    `json:"full_name"`
-	Phone        string    `json:"phone,omitempty"`
-	Role         string    `json:"role"`
-	Balance      int64     `json:"balance"`
-	DailyLimit   int64     `json:"daily_limit"`
-	MonthlyLimit int64     `json:"monthly_limit"`
-	IsBlocked    bool      `json:"is_blocked"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           int64      `json:"id"`
+	Email        string     `json:"email"`
+	PasswordHash string     `json:"-"`
+	FullName     string     `json:"full_name"`
+	Phone        string     `json:"phone,omitempty"`
+	Role         string     `json:"role"`
+	Balance      int64      `json:"balance"`
+	DailyLimit   int64      `json:"daily_limit"`
+	MonthlyLimit int64      `json:"monthly_limit"`
+	IsBlocked    bool       `json:"is_blocked"`
+	BlockReason  string     `json:"block_reason,omitempty"`
+	BlockedAt    *time.Time `json:"blocked_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
+type BlockInfo struct {
+	UserID               int64      `json:"user_id"`
+	IsBlocked            bool       `json:"is_blocked"`
+	BlockReason          string     `json:"block_reason,omitempty"`
+	BlockedAt            *time.Time `json:"blocked_at,omitempty"`
+	SuspiciousPayments   int64      `json:"suspicious_payments"`
+	RejectedPayments     int64      `json:"rejected_payments"`
+	SuspiciousOperations []Payment  `json:"suspicious_operations"`
 }
 
 type Payment struct {
@@ -215,14 +232,14 @@ func (s *Store) CountUsersByRole(ctx context.Context, role string) (int64, error
 
 func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 	return scanUser(s.pool.QueryRow(ctx, `
-		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
+		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, coalesce(block_reason, ''), blocked_at, created_at
 		from users where email=$1
 	`, email))
 }
 
 func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 	return scanUser(s.pool.QueryRow(ctx, `
-		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
+		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, coalesce(block_reason, ''), blocked_at, created_at
 		from users where id=$1
 	`, id))
 }
@@ -264,7 +281,7 @@ func (s *Store) SearchUsers(ctx context.Context, filter UserSearch) ([]User, err
 	query := "%" + filter.Query + "%"
 
 	rows, err := s.pool.Query(ctx, `
-		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
+		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, coalesce(block_reason, ''), blocked_at, created_at
 		from users
 		where ($1 = '' or role = $1)
 		  and ($2 = '%%' or email ilike $2 or full_name ilike $2 or coalesce(phone, '') ilike $2 or id::text = trim(both '%' from $2))
@@ -336,9 +353,9 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 
 	var sender User
 	err = tx.QueryRow(ctx, `
-		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, created_at
+		select id, email, password_hash, full_name, coalesce(phone, ''), role, balance_cents, daily_limit_cents, monthly_limit_cents, is_blocked, coalesce(block_reason, ''), blocked_at, created_at
 		from users where id=$1 for update
-	`, payment.SenderID).Scan(&sender.ID, &sender.Email, &sender.PasswordHash, &sender.FullName, &sender.Phone, &sender.Role, &sender.Balance, &sender.DailyLimit, &sender.MonthlyLimit, &sender.IsBlocked, &sender.CreatedAt)
+	`, payment.SenderID).Scan(&sender.ID, &sender.Email, &sender.PasswordHash, &sender.FullName, &sender.Phone, &sender.Role, &sender.Balance, &sender.DailyLimit, &sender.MonthlyLimit, &sender.IsBlocked, &sender.BlockReason, &sender.BlockedAt, &sender.CreatedAt)
 	if err != nil {
 		return payment, err
 	}
@@ -380,15 +397,15 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		return payment, errors.New("insufficient balance")
 	}
 
-	// Check daily limit
+	// Check daily limit. Pending payments are counted too, otherwise a burst can bypass limits.
 	var dailySpent int64
 	err = tx.QueryRow(ctx, `
 		select coalesce(sum(amount_cents + commission_cents), 0)
 		from payments
 		where sender_id=$1
-		  and status in ($2, $3)
+		  and status not in ($2, $3)
 		  and created_at::date = current_date
-	`, payment.SenderID, StatusApproved, StatusCompleted).Scan(&dailySpent)
+	`, payment.SenderID, StatusRejected, StatusCancelled).Scan(&dailySpent)
 	if err != nil {
 		return payment, err
 	}
@@ -396,15 +413,15 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		return payment, errors.New("daily limit exceeded")
 	}
 
-	// Check monthly limit
+	// Check monthly limit. Pending payments are counted too for the same reason.
 	var monthlySpent int64
 	err = tx.QueryRow(ctx, `
 		select coalesce(sum(amount_cents + commission_cents), 0)
 		from payments
 		where sender_id=$1
-		  and status in ($2, $3)
+		  and status not in ($2, $3)
 		  and date_trunc('month', created_at) = date_trunc('month', current_timestamp)
-	`, payment.SenderID, StatusApproved, StatusCompleted).Scan(&monthlySpent)
+	`, payment.SenderID, StatusRejected, StatusCancelled).Scan(&monthlySpent)
 	if err != nil {
 		return payment, err
 	}
@@ -421,29 +438,31 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		from payments
 		where sender_id=$1
 		  and recipient_id=$2
-		  and status in ($3, $4)
+		  and status not in ($3, $4)
 		  and created_at > now() - interval '24 hours'
-	`, payment.SenderID, payment.RecipientID, StatusApproved, StatusCompleted).Scan(&recipientPaymentCount, &recipientPaymentSum)
+	`, payment.SenderID, payment.RecipientID, StatusRejected, StatusCancelled).Scan(&recipientPaymentCount, &recipientPaymentSum)
 	if err != nil {
 		return payment, err
 	}
 
 	// 2. Check for suspicious patterns
 	fraud_suspicion := 0
-	
-	// Pattern 1: More than 3 payments to same recipient in 24h
-	if recipientPaymentCount >= 3 {
-		fraud_suspicion += 30
+
+	// Pattern 1: Repeated payments to the same recipient in 24h.
+	if recipientPaymentCount >= 4 {
+		fraud_suspicion += 65
+	} else if recipientPaymentCount >= 2 {
+		fraud_suspicion += 35
 	}
-	
-	// Pattern 2: Very large payment (> 500,000 cents = 5000 rubles)
-	if payment.Amount > 50000000 {
+
+	// Pattern 2: Large payment (> 100,000 cents = 1,000 rubles)
+	if payment.Amount > 100000 {
 		fraud_suspicion += 25
 	}
-	
-	// Pattern 3: Total sent to recipient in 24h exceeds 1,000,000 cents = 10000 rubles
-	if recipientPaymentSum+payment.Amount > 100000000 {
-		fraud_suspicion += 20
+
+	// Pattern 3: Total sent to one recipient in 24h exceeds 150,000 cents = 1,500 rubles.
+	if recipientPaymentSum+payment.Amount > 150000 {
+		fraud_suspicion += 30
 	}
 
 	// Pattern 4: Many different recipients in last hour
@@ -452,9 +471,9 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		select count(distinct recipient_id)
 		from payments
 		where sender_id=$1
-		  and status in ($2, $3)
+		  and status not in ($2, $3)
 		  and created_at > now() - interval '1 hour'
-	`, payment.SenderID, StatusApproved, StatusCompleted).Scan(&recipientCount)
+	`, payment.SenderID, StatusRejected, StatusCancelled).Scan(&recipientCount)
 	if err != nil {
 		return payment, err
 	}
@@ -462,33 +481,65 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		fraud_suspicion += 25
 	}
 
+	// Pattern 5: Payment from freshly created account (< 1 hour)
+	var accountAgeMinutes int64
 	err = tx.QueryRow(ctx, `
-		insert into payments (sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type, description)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
-		returning id, fraud_score, created_at
-	`, payment.SenderID, payment.RecipientID, payment.Amount, payment.Commission, payment.CommissionRuleID, payment.Status, payment.PaymentType, payment.Description).
-		Scan(&payment.ID, &payment.FraudScore, &payment.CreatedAt)
+		select extract(epoch from (now() - created_at)) / 60
+		from users where id = $1
+	`, payment.SenderID).Scan(&accountAgeMinutes)
+	if err == nil && accountAgeMinutes < 60 {
+		fraud_suspicion += 40
+	}
+
+	// Pattern 6: Account never completed a payment before
+	var completedCount int64
+	err = tx.QueryRow(ctx, `
+		select count(*) from payments
+		where sender_id=$1 and status in ($2, $3)
+	`, payment.SenderID, StatusApproved, StatusCompleted).Scan(&completedCount)
+	if err == nil && completedCount == 0 && payment.Amount > 100000 {
+		fraud_suspicion += 20
+	}
+
+	if fraud_suspicion >= fraudCriticalScore {
+		payment.Status = StatusRejected
+		payment.RejectionReason = fmt.Sprintf("fraud detected: score=%d", fraud_suspicion)
+	}
+
+	err = tx.QueryRow(ctx, `
+		insert into payments (sender_id, recipient_id, amount_cents, commission_cents, commission_rule_id, status, payment_type, description, fraud_score, rejection_reason, processed_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, nullif($10, ''), case when $6 = $11 then now() else null end)
+		returning id, fraud_score, created_at, processed_at
+	`, payment.SenderID, payment.RecipientID, payment.Amount, payment.Commission, payment.CommissionRuleID, payment.Status, payment.PaymentType, payment.Description, fraud_suspicion, payment.RejectionReason, StatusRejected).
+		Scan(&payment.ID, &payment.FraudScore, &payment.CreatedAt, &payment.ProcessedAt)
 	if err != nil {
 		return payment, err
 	}
 
-	// If fraud suspicion is high, update fraud score for processing system
-	if fraud_suspicion > 0 {
+	// If fraud suspicion is high, update fraud score and possibly block user
+	if fraud_suspicion >= fraudCriticalScore {
+		reason := fmt.Sprintf("Suspicious payment activity detected (fraud score: %d, payment_id: %d)", fraud_suspicion, payment.ID)
 		_, err = tx.Exec(ctx, `
-			update payments
-			set fraud_score = $2
+			update users
+			set is_blocked = true, block_reason = $2, blocked_at = now()
 			where id = $1
-		`, payment.ID, fraud_suspicion)
+		`, payment.SenderID, reason)
 		if err != nil {
 			return payment, err
 		}
-		payment.FraudScore = fraud_suspicion
+		_, err = tx.Exec(ctx, `
+			insert into audit_log (user_id, action, entity_type, entity_id, details)
+			values ($1, 'USER_BLOCKED', 'user', $2, $3)
+		`, payment.SenderID, payment.SenderID, reason)
+		if err != nil {
+			return payment, err
+		}
 	}
 
 	_, err = tx.Exec(ctx, `
 		insert into audit_log (user_id, action, entity_type, entity_id, details)
 		values ($1, 'CREATE_PAYMENT', 'payment', $2, $3)
-	`, payment.SenderID, payment.ID, fmt.Sprintf("amount=%d", payment.Amount))
+	`, payment.SenderID, payment.ID, fmt.Sprintf("amount=%d fraud_score=%d status=%s", payment.Amount, payment.FraudScore, payment.Status))
 	if err != nil {
 		return payment, err
 	}
@@ -507,6 +558,58 @@ func (s *Store) GetPayment(ctx context.Context, id int64) (Payment, error) {
 		join users ru on ru.id=p.recipient_id
 		where p.id=$1
 	`, id))
+}
+
+func (s *Store) GetBlockInfo(ctx context.Context, userID int64) (BlockInfo, error) {
+	var info BlockInfo
+	info.UserID = userID
+
+	err := s.pool.QueryRow(ctx, `
+		select is_blocked, coalesce(block_reason, ''), blocked_at
+		from users where id=$1
+	`, userID).Scan(&info.IsBlocked, &info.BlockReason, &info.BlockedAt)
+	if err != nil {
+		return info, err
+	}
+
+	err = s.pool.QueryRow(ctx, `
+		select count(*) from payments
+		where sender_id=$1 and fraud_score >= $2
+	`, userID, fraudReviewScore).Scan(&info.SuspiciousPayments)
+	if err != nil {
+		return info, err
+	}
+
+	err = s.pool.QueryRow(ctx, `
+		select count(*) from payments
+		where sender_id=$1 and status=$2
+	`, userID, StatusRejected).Scan(&info.RejectedPayments)
+	if err != nil {
+		return info, err
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
+		       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
+		       coalesce(p.description, ''), p.fraud_score, p.approved_by, coalesce(p.rejection_reason, ''),
+		       p.created_at, p.processed_at
+		from payments p
+		join users su on su.id=p.sender_id
+		join users ru on ru.id=p.recipient_id
+		where p.sender_id=$1 and p.fraud_score > 0
+		order by p.created_at desc
+		limit 20
+	`, userID)
+	if err != nil {
+		return info, err
+	}
+	defer rows.Close()
+	info.SuspiciousOperations, err = scanPayments(rows)
+	if err != nil {
+		return info, err
+	}
+
+	return info, nil
 }
 
 func (s *Store) ListPayments(ctx context.Context, user User) ([]Payment, error) {
@@ -879,7 +982,7 @@ func (s *Store) Audit(ctx context.Context, limit int) ([]AuditEntry, error) {
 
 func scanUser(row pgx.Row) (User, error) {
 	var user User
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.FullName, &user.Phone, &user.Role, &user.Balance, &user.DailyLimit, &user.MonthlyLimit, &user.IsBlocked, &user.CreatedAt)
+	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.FullName, &user.Phone, &user.Role, &user.Balance, &user.DailyLimit, &user.MonthlyLimit, &user.IsBlocked, &user.BlockReason, &user.BlockedAt, &user.CreatedAt)
 	return user, err
 }
 
@@ -913,6 +1016,8 @@ create table if not exists users (
 	daily_limit_cents bigint not null default 10000000,
 	monthly_limit_cents bigint not null default 100000000,
 	is_blocked boolean not null default false,
+	block_reason text,
+	blocked_at timestamptz,
 	created_at timestamptz not null default now(),
 	updated_at timestamptz not null default now()
 );
@@ -962,6 +1067,9 @@ create table if not exists payments (
 	created_at timestamptz not null default now(),
 	processed_at timestamptz
 );
+
+alter table users add column if not exists block_reason text;
+alter table users add column if not exists blocked_at timestamptz;
 
 alter table payments drop column if exists template_id;
 alter table payments add column if not exists commission_rule_id bigint references commissions(id);
