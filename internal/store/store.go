@@ -489,12 +489,67 @@ func (s *Store) PaymentsForUser(ctx context.Context, userID int64, limit int) ([
 }
 
 func (s *Store) ApplyProcessingResult(ctx context.Context, paymentID int64, status string, fraudScore int, reason string) error {
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Get payment details for potential balance updates
+	var payment Payment
+	err = tx.QueryRow(ctx, `
+		select id, sender_id, recipient_id, amount_cents, commission_cents
+		from payments
+		where id=$1 and status=$2
+	`, paymentID, StatusPending).Scan(&payment.ID, &payment.SenderID, &payment.RecipientID, &payment.Amount, &payment.Commission)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
 		update payments
 		set status=$2, fraud_score=$3, rejection_reason=nullif($4, ''), processed_at=now()
 		where id=$1 and status=$5
 	`, paymentID, status, fraudScore, reason, StatusPending)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// If processing result is approved/completed, update user balances atomically
+	if (status == StatusApproved || status == StatusCompleted) && payment.ID != 0 {
+		totalDebit := payment.Amount + payment.Commission
+
+		// Debit sender account (amount + commission)
+		tag, err := tx.Exec(ctx, `
+			update users
+			set balance_cents = balance_cents - $2, updated_at=now()
+			where id=$1 and balance_cents >= $2
+		`, payment.SenderID, totalDebit)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			// Revert payment status if balance update fails
+			_, _ = tx.Exec(ctx, `
+				update payments
+				set status=$2, fraud_score=$3, rejection_reason=$4, processed_at=null
+				where id=$1 and status=$5
+			`, paymentID, StatusPending, fraudScore, "Insufficient balance for execution", status)
+			return errors.New("insufficient balance for payment execution")
+		}
+
+		// Credit recipient account (amount only)
+		_, err = tx.Exec(ctx, `
+			update users
+			set balance_cents = balance_cents + $2, updated_at=now()
+			where id=$1
+		`, payment.RecipientID, payment.Amount)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (s *Store) DecidePayment(ctx context.Context, paymentID, bankerID int64, status, reason string) error {
@@ -503,6 +558,20 @@ func (s *Store) DecidePayment(ctx context.Context, paymentID, bankerID int64, st
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	// Get payment details for balance updates
+	var payment Payment
+	err = tx.QueryRow(ctx, `
+		select id, sender_id, recipient_id, amount_cents, commission_cents, status
+		from payments
+		where id=$1 and status=$2
+	`, paymentID, StatusPending).Scan(&payment.ID, &payment.SenderID, &payment.RecipientID, &payment.Amount, &payment.Commission, &payment.Status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("payment is not pending")
+		}
+		return err
+	}
 
 	tag, err := tx.Exec(ctx, `
 		update payments
@@ -514,6 +583,34 @@ func (s *Store) DecidePayment(ctx context.Context, paymentID, bankerID int64, st
 	}
 	if tag.RowsAffected() == 0 {
 		return errors.New("payment is not pending")
+	}
+
+	// If payment is approved, update user balances atomically
+	if status == StatusApproved {
+		totalDebit := payment.Amount + payment.Commission
+
+		// Debit sender account (amount + commission)
+		tag, err := tx.Exec(ctx, `
+			update users
+			set balance_cents = balance_cents - $2, updated_at=now()
+			where id=$1 and balance_cents >= $2
+		`, payment.SenderID, totalDebit)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errors.New("insufficient balance for payment execution")
+		}
+
+		// Credit recipient account (amount only)
+		_, err = tx.Exec(ctx, `
+			update users
+			set balance_cents = balance_cents + $2, updated_at=now()
+			where id=$1
+		`, payment.RecipientID, payment.Amount)
+		if err != nil {
+			return err
+		}
 	}
 
 	_, err = tx.Exec(ctx, `
