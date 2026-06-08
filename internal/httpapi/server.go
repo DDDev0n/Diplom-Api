@@ -49,6 +49,9 @@ func (s Server) Routes() http.Handler {
 	mux.Handle("POST /api/payments/by-email", s.authenticated(http.HandlerFunc(s.createPaymentByEmail)))
 	mux.Handle("GET /api/payments", s.authenticated(http.HandlerFunc(s.listPayments)))
 	mux.Handle("GET /api/payments/{id}", s.authenticated(http.HandlerFunc(s.getPayment)))
+	mux.Handle("GET /api/notifications", s.authenticated(http.HandlerFunc(s.notifications)))
+	mux.Handle("POST /api/notifications/{id}/read", s.authenticated(http.HandlerFunc(s.markNotificationRead)))
+	mux.Handle("POST /api/notifications/read-all", s.authenticated(http.HandlerFunc(s.markAllNotificationsRead)))
 	mux.Handle("GET /api/banker/queue", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.bankerQueue))))
 	mux.Handle("GET /api/banker/clients", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.searchClients))))
 	mux.Handle("GET /api/banker/clients/{id}", s.authenticated(s.requireRole(store.RoleBanker, store.RoleAdmin, http.HandlerFunc(s.clientProfile))))
@@ -61,6 +64,7 @@ func (s Server) Routes() http.Handler {
 	mux.Handle("PUT /api/admin/users/{id}/limits", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUpdateUserLimits))))
 	mux.Handle("PUT /api/admin/users/{id}/block", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminBlockUser))))
 	mux.Handle("PUT /api/admin/users/{id}/unblock", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminUnblockUser))))
+	mux.Handle("PUT /api/admin/users/{id}/clear-hold", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminClearUserHold))))
 	mux.Handle("GET /api/admin/stats", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminStats))))
 	mux.Handle("GET /api/admin/audit", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminAudit))))
 	mux.Handle("GET /api/admin/bankers/{id}/history", s.authenticated(s.requireRole(store.RoleAdmin, http.HandlerFunc(s.adminBankerHistory))))
@@ -374,8 +378,47 @@ func (s Server) getPayment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payment)
 }
 
+func (s Server) notifications(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.Notifications(r.Context(), currentUser(r).ID, queryBool(r, "unread"), queryLimit(r, 50), queryOffset(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.MarkNotificationRead(r.Context(), currentUser(r).ID, id); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.MarkAllNotificationsRead(r.Context(), currentUser(r).ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s Server) bankerQueue(w http.ResponseWriter, r *http.Request) {
-	payments, err := s.store.PendingPayments(r.Context())
+	payments, err := s.store.PendingPayments(r.Context(), store.PaymentQueueFilter{
+		MinFraud: queryInt(r, "min_fraud", 0),
+		MaxFraud: queryInt(r, "max_fraud", 100),
+		Sort:     strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort"))),
+		Order:    strings.ToLower(strings.TrimSpace(r.URL.Query().Get("order"))),
+		Limit:    queryLimit(r, 100),
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -606,6 +649,33 @@ func (s Server) adminUnblockUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user)
 }
 
+type clearHoldRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (s Server) adminClearUserHold(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req clearHoldRequest
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	user, err := s.store.ClearUserOperationHold(r.Context(), id, currentUser(r).ID, strings.TrimSpace(req.Reason))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pgx.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
 func (s Server) adminStats(w http.ResponseWriter, r *http.Request) {
 	paymentStats, err := s.store.PaymentStats(r.Context())
 	if err != nil {
@@ -740,18 +810,46 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 }
 
 func queryLimit(r *http.Request, fallback int) int {
-	value := r.URL.Query().Get("limit")
-	if value == "" {
-		return fallback
-	}
-	limit, err := strconv.Atoi(value)
-	if err != nil || limit <= 0 {
+	limit := queryInt(r, "limit", fallback)
+	if limit <= 0 {
 		return fallback
 	}
 	if limit > 500 {
 		return 500
 	}
 	return limit
+}
+
+func queryOffset(r *http.Request) int {
+	offset := queryInt(r, "offset", 0)
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
+func queryInt(r *http.Request, key string, fallback int) int {
+	value := r.URL.Query().Get(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func queryBool(r *http.Request, key string) bool {
+	value := strings.TrimSpace(strings.ToLower(r.URL.Query().Get(key)))
+	if value == "" {
+		return false
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false
+	}
+	return parsed
 }
 
 func withCORS(next http.Handler) http.Handler {

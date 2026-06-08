@@ -98,15 +98,29 @@ type Notification struct {
 	UserID    int64     `json:"user_id"`
 	Type      string    `json:"type"`
 	Title     string    `json:"title"`
-	Message   string    `json:"message"`
+	Body      string    `json:"body"`
+	PaymentID *int64    `json:"payment_id,omitempty"`
 	IsRead    bool      `json:"is_read"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type NotificationList struct {
+	Items []Notification `json:"items"`
+	Total int64          `json:"total"`
 }
 
 type UserSearch struct {
 	Query string
 	Role  string
 	Limit int
+}
+
+type PaymentQueueFilter struct {
+	MinFraud int
+	MaxFraud int
+	Sort     string
+	Order    string
+	Limit    int
 }
 
 type PublicUser struct {
@@ -339,6 +353,40 @@ func (s *Store) UnblockUser(ctx context.Context, userID, adminID int64) (User, e
 		values ($1, 'ADMIN_USER_UNBLOCKED', 'user', $2, 'fraud history reset')
 	`, adminID, userID)
 	if err != nil {
+		return User{}, err
+	}
+
+	return user, tx.Commit(ctx)
+}
+
+func (s *Store) ClearUserOperationHold(ctx context.Context, userID, adminID int64, reason string) (User, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return User{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	user, err := scanUser(tx.QueryRow(ctx, `
+		update users
+		set operation_hold_payment_id=null, operation_hold_reason=null, operation_hold_at=null, updated_at=now()
+		where id=$1
+		returning `+userSelectColumns+`
+	`, userID))
+	if err != nil {
+		return User{}, err
+	}
+
+	if reason == "" {
+		reason = "operation hold cleared"
+	}
+	_, err = tx.Exec(ctx, `
+		insert into audit_log (user_id, action, entity_type, entity_id, details)
+		values ($1, 'ADMIN_USER_HOLD_CLEARED', 'user', $2, $3)
+	`, adminID, userID, reason)
+	if err != nil {
+		return User{}, err
+	}
+	if err := insertNotification(ctx, tx, userID, "HOLD_CLEARED", "Ограничение снято", reason, nil); err != nil {
 		return User{}, err
 	}
 
@@ -617,6 +665,9 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 		if err != nil {
 			return payment, err
 		}
+		if err := insertNotification(ctx, tx, payment.SenderID, "PAYMENT_HOLD", "Платёж ожидает проверки", reason, &payment.ID); err != nil {
+			return payment, err
+		}
 	}
 
 	// If fraud suspicion is high, update fraud score and possibly block user
@@ -635,6 +686,9 @@ func (s *Store) CreatePayment(ctx context.Context, payment Payment) (Payment, er
 			values ($1, 'USER_BLOCKED', 'user', $2, $3)
 		`, payment.SenderID, payment.SenderID, reason)
 		if err != nil {
+			return payment, err
+		}
+		if err := insertNotification(ctx, tx, payment.SenderID, "USER_BLOCKED", "Пользователь заблокирован", reason, &payment.ID); err != nil {
 			return payment, err
 		}
 	}
@@ -752,7 +806,33 @@ func (s *Store) ListPayments(ctx context.Context, user User) ([]Payment, error) 
 	return scanPayments(rows)
 }
 
-func (s *Store) PendingPayments(ctx context.Context) ([]Payment, error) {
+func (s *Store) PendingPayments(ctx context.Context, filter PaymentQueueFilter) ([]Payment, error) {
+	if filter.MaxFraud <= 0 || filter.MaxFraud > 100 {
+		filter.MaxFraud = 100
+	}
+	if filter.MinFraud < 0 {
+		filter.MinFraud = 0
+	}
+	if filter.MinFraud > filter.MaxFraud {
+		filter.MinFraud = filter.MaxFraud
+	}
+	if filter.Limit <= 0 || filter.Limit > 200 {
+		filter.Limit = 100
+	}
+	orderBy := "p.created_at asc"
+	switch filter.Sort {
+	case "fraud_score":
+		orderBy = "p.fraud_score"
+	case "amount":
+		orderBy = "p.amount_cents"
+	case "created_at", "":
+		orderBy = "p.created_at"
+	}
+	if filter.Order == "desc" {
+		orderBy += " desc"
+	} else {
+		orderBy += " asc"
+	}
 	rows, err := s.pool.Query(ctx, `
 		select p.id, p.sender_id, p.recipient_id, su.full_name, ru.full_name,
 		       p.amount_cents, p.commission_cents, p.commission_rule_id, p.status, p.payment_type,
@@ -761,8 +841,11 @@ func (s *Store) PendingPayments(ctx context.Context) ([]Payment, error) {
 		from payments p
 		join users su on su.id=p.sender_id
 		join users ru on ru.id=p.recipient_id
-		where p.status=$1 order by p.created_at asc limit 100
-	`, StatusPending)
+		where p.status=$1
+		  and p.fraud_score between $2 and $3
+		order by `+orderBy+`
+		limit $4
+	`, StatusPending, filter.MinFraud, filter.MaxFraud, filter.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -818,6 +901,20 @@ func (s *Store) ApplyProcessingResult(ctx context.Context, paymentID int64, stat
 	`, paymentID, status, fraudScore, reason, StatusPending)
 	if err != nil {
 		return err
+	}
+	if payment.ID != 0 {
+		title := paymentStatusNotificationTitle(status)
+		if title != "" {
+			body := paymentStatusNotificationBody(status, reason)
+			if err := insertNotification(ctx, tx, payment.SenderID, "PAYMENT_"+status, title, body, &payment.ID); err != nil {
+				return err
+			}
+			if (status == StatusApproved || status == StatusCompleted) && payment.RecipientID != payment.SenderID {
+				if err := insertNotification(ctx, tx, payment.RecipientID, "PAYMENT_RECEIVED", "Поступил платёж", "На ваш счёт поступил платёж", &payment.ID); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	// If processing result is approved/completed, update user balances atomically
@@ -933,6 +1030,13 @@ func (s *Store) DecidePayment(ctx context.Context, paymentID, bankerID int64, st
 	`, bankerID, "BANKER_"+status, paymentID, reason)
 	if err != nil {
 		return err
+	}
+	title := paymentStatusNotificationTitle(status)
+	if title != "" {
+		body := paymentStatusNotificationBody(status, reason)
+		if err := insertNotification(ctx, tx, payment.SenderID, "PAYMENT_"+status, title, body, &payment.ID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -1096,6 +1200,100 @@ func (s *Store) Audit(ctx context.Context, limit int) ([]AuditEntry, error) {
 	return items, rows.Err()
 }
 
+func (s *Store) Notifications(ctx context.Context, userID int64, unreadOnly bool, limit, offset int) (NotificationList, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var out NotificationList
+	err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from notifications
+		where user_id=$1 and (not $2 or is_read=false)
+	`, userID, unreadOnly).Scan(&out.Total)
+	if err != nil {
+		return out, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		select id, user_id, type, title, coalesce(message, ''), payment_id, is_read, created_at
+		from notifications
+		where user_id=$1 and (not $2 or is_read=false)
+		order by created_at desc
+		limit $3 offset $4
+	`, userID, unreadOnly, limit, offset)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+
+	out.Items = make([]Notification, 0)
+	for rows.Next() {
+		var item Notification
+		if err := rows.Scan(&item.ID, &item.UserID, &item.Type, &item.Title, &item.Body, &item.PaymentID, &item.IsRead, &item.CreatedAt); err != nil {
+			return out, err
+		}
+		out.Items = append(out.Items, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) MarkNotificationRead(ctx context.Context, userID, notificationID int64) error {
+	tag, err := s.pool.Exec(ctx, `
+		update notifications set is_read=true
+		where id=$1 and user_id=$2
+	`, notificationID, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) MarkAllNotificationsRead(ctx context.Context, userID int64) error {
+	_, err := s.pool.Exec(ctx, `
+		update notifications set is_read=true
+		where user_id=$1 and is_read=false
+	`, userID)
+	return err
+}
+
+func insertNotification(ctx context.Context, tx pgx.Tx, userID int64, notificationType, title, body string, paymentID *int64) error {
+	_, err := tx.Exec(ctx, `
+		insert into notifications (user_id, type, title, message, payment_id)
+		values ($1, $2, $3, $4, $5)
+	`, userID, notificationType, title, body, paymentID)
+	return err
+}
+
+func paymentStatusNotificationTitle(status string) string {
+	switch status {
+	case StatusApproved, StatusCompleted:
+		return "Платёж одобрен"
+	case StatusRejected:
+		return "Платёж отклонён"
+	default:
+		return ""
+	}
+}
+
+func paymentStatusNotificationBody(status, reason string) string {
+	switch status {
+	case StatusApproved, StatusCompleted:
+		return "Платёж успешно обработан"
+	case StatusRejected:
+		if reason != "" {
+			return reason
+		}
+		return "Платёж отклонён"
+	default:
+		return ""
+	}
+}
+
 func scanUser(row pgx.Row) (User, error) {
 	var user User
 	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.FullName, &user.Phone, &user.Role, &user.Balance, &user.DailyLimit, &user.MonthlyLimit, &user.IsBlocked, &user.BlockReason, &user.BlockedAt, &user.OperationHoldPaymentID, &user.OperationHoldReason, &user.OperationHoldAt, &user.CreatedAt)
@@ -1223,9 +1421,11 @@ create table if not exists notifications (
 	type varchar(50) not null,
 	title varchar(255) not null,
 	message text not null,
+	payment_id bigint references payments(id),
 	is_read boolean not null default false,
 	created_at timestamptz not null default now()
 );
+alter table notifications add column if not exists payment_id bigint references payments(id);
 
 create table if not exists audit_log (
 	id bigserial primary key,

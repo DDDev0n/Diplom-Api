@@ -325,11 +325,81 @@ const openapiSpec = `{
         }
       }
     },
+    "/api/notifications": {
+      "get": {
+        "tags": ["Notifications"],
+        "summary": "Список уведомлений пользователя",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "unread", "in": "query", "schema": { "type": "boolean", "default": false } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Уведомления",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NotificationList" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/notifications/{id}/read": {
+      "post": {
+        "tags": ["Notifications"],
+        "summary": "Отметить уведомление прочитанным",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/StatusResponse" },
+                "example": { "status": "ok" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/notifications/read-all": {
+      "post": {
+        "tags": ["Notifications"],
+        "summary": "Отметить все уведомления прочитанными",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/StatusResponse" },
+                "example": { "status": "ok" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/api/banker/queue": {
       "get": {
         "tags": ["Banker"],
         "summary": "Очередь платежей на проверку",
         "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "min_fraud", "in": "query", "schema": { "type": "integer", "default": 0, "minimum": 0, "maximum": 100 } },
+          { "name": "max_fraud", "in": "query", "schema": { "type": "integer", "default": 100, "minimum": 0, "maximum": 100 } },
+          { "name": "sort", "in": "query", "schema": { "type": "string", "enum": ["created_at", "fraud_score", "amount"], "default": "created_at" } },
+          { "name": "order", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"], "default": "asc" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } }
+        ],
         "responses": {
           "200": {
             "description": "Платежи со статусом PENDING",
@@ -539,6 +609,38 @@ const openapiSpec = `{
               }
             }
           },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/admin/users/{id}/clear-hold": {
+      "put": {
+        "tags": ["Admin"],
+        "summary": "Снять временное ограничение операций",
+        "description": "Доступно только ADMIN. Очищает operation_hold_payment_id/reason/at без изменения is_blocked.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PathID" }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ClearHoldRequest" },
+              "example": { "reason": "Проверка завершена администратором" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ограничение снято",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/User" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" }
@@ -864,6 +966,35 @@ const openapiSpec = `{
         "type": "object",
         "properties": {
           "reason": { "type": "string" }
+        }
+      },
+      "ClearHoldRequest": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string" }
+        }
+      },
+      "Notification": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "user_id": { "type": "integer", "format": "int64" },
+          "type": { "type": "string" },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "payment_id": { "type": "integer", "format": "int64" },
+          "is_read": { "type": "boolean" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "NotificationList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Notification" }
+          },
+          "total": { "type": "integer", "format": "int64" }
         }
       },
       "CreatePaymentRequest": {
