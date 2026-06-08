@@ -318,6 +318,43 @@ func TestUnblockUserResetsLimitHistoryCutoff(t *testing.T) {
 	}
 }
 
+func TestAdminBlockAndClearHoldCreateLocalizedNotifications(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := openTestStore(t, ctx)
+
+	client := createFraudTestUser(t, ctx, s, "notify-client", 10_000_000)
+	admin := createFraudTestUser(t, ctx, s, "notify-admin", 0)
+	setUserRole(t, ctx, s, admin.ID, RoleAdmin)
+
+	t.Cleanup(func() {
+		cleanupFraudTestUsers(t, ctx, s, client.ID, admin.ID)
+	})
+
+	if _, err := s.BlockUser(ctx, client.ID, admin.ID, "Проверка документов"); err != nil {
+		t.Fatalf("BlockUser returned error: %v", err)
+	}
+	notifications, err := s.Notifications(ctx, client.ID, false, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notifications.Total != 1 || notifications.Items[0].Type != "USER_BLOCKED" || notifications.Items[0].Body != "Проверка документов" {
+		t.Fatalf("block notifications = %+v, want localized USER_BLOCKED", notifications)
+	}
+
+	if _, err := s.ClearUserOperationHold(ctx, client.ID, admin.ID, ""); err != nil {
+		t.Fatalf("ClearUserOperationHold returned error: %v", err)
+	}
+	notifications, err = s.Notifications(ctx, client.ID, false, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notifications.Total != 2 || notifications.Items[0].Type != "HOLD_CLEARED" || notifications.Items[0].Body != "Ограничение операций снято администратором" {
+		t.Fatalf("clear-hold notifications = %+v, want localized HOLD_CLEARED", notifications)
+	}
+}
+
 func openTestStore(t *testing.T, ctx context.Context) *Store {
 	t.Helper()
 

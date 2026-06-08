@@ -319,6 +319,13 @@ func (s *Store) BlockUser(ctx context.Context, userID, adminID int64, reason str
 	if err != nil {
 		return User{}, err
 	}
+	body := reason
+	if body == "" {
+		body = "Пользователь заблокирован администратором"
+	}
+	if err := insertNotification(ctx, tx, userID, "USER_BLOCKED", "Пользователь заблокирован", body, nil); err != nil {
+		return User{}, err
+	}
 
 	return user, tx.Commit(ctx)
 }
@@ -377,7 +384,7 @@ func (s *Store) ClearUserOperationHold(ctx context.Context, userID, adminID int6
 	}
 
 	if reason == "" {
-		reason = "operation hold cleared"
+		reason = "Ограничение операций снято администратором"
 	}
 	_, err = tx.Exec(ctx, `
 		insert into audit_log (user_id, action, entity_type, entity_id, details)
